@@ -1,93 +1,71 @@
 # Server Forensics Recorder
 
-Server Forensics Recorder is a lightweight Linux flight recorder for intermittent server outages. It is designed for cPanel, CloudLinux, Apache, `mod_lsapi`, `lsphp`, MariaDB, Exim, and WordPress workloads, but the core collector stays generic enough for most production Linux web servers.
+[![CI](https://github.com/Dr-Hack/Server-Forensics-Recorder/actions/workflows/ci.yml/badge.svg)](https://github.com/Dr-Hack/Server-Forensics-Recorder/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Shell](https://img.shields.io/badge/Shell-Bash-4EAA25.svg)](scripts/)
+[![Platform](https://img.shields.io/badge/Platform-Linux-blue.svg)](docs/installation.md)
 
-This is not a monitoring replacement. Monitoring tells you something went wrong. This tool preserves the evidence that explains why it went wrong before the evidence disappears.
+A lightweight Linux server forensic recorder for intermittent outages on
+cPanel, CloudLinux, Apache, `mod_lsapi`, `lsphp`, MariaDB, Exim, and WordPress
+servers.
 
-## Repository Layout
+Think of it as a small black box for production web servers.
 
-```text
-server-forensics/
-├── README.md
-├── DESIGN.md
-├── CHANGELOG.md
-├── LICENSE
-├── config.conf
-├── install.sh
-├── uninstall.sh
-├── docs/
-│   ├── architecture.md
-│   ├── installation.md
-│   └── troubleshooting.md
-├── tests/
-│   └── syntax.sh
-├── scripts/
-│   ├── collector.sh
-│   ├── watcher.sh
-│   ├── panic.sh
-│   └── rotate.sh
-├── lib/
-│   ├── metrics.sh
-│   ├── logging.sh
-│   ├── incident.sh
-│   └── utils.sh
-└── systemd/
-    ├── service
-    └── timer
-```
+Monitoring tells you **that** a problem happened.
 
-## Architecture
+Server Forensics Recorder preserves evidence so you can determine **why** it
+happened.
 
-Normal operation is intentionally cheap:
+## Why This Exists
 
-1. `server-forensics.timer` starts `server-forensics.service` once per minute.
-2. `scripts/watcher.sh` records one lightweight metric line in `current.log`.
-3. The watcher compares that line with configured thresholds.
-4. If healthy, it exits.
-5. If unhealthy, `scripts/panic.sh` creates or continues an incident and captures richer diagnostics every 10 seconds until recovery.
-6. `scripts/rotate.sh` compresses and removes old incidents beyond the retention limit.
+Intermittent outages often disappear before an administrator can log in. Load
+settles, workers exit, sockets close, queues drain, and the useful evidence is
+gone.
 
-The normal collector reads mostly from `/proc` and uses short timeouts around optional commands. Expensive tools such as `lsof`, `journalctl`, `top`, `vmstat`, `iostat`, and full process listings are used only in panic mode.
+This project records cheap metrics during normal operation and automatically
+captures deeper diagnostics only when the server crosses a configured threshold.
+It is intentionally not a monitoring dashboard. Netdata, Prometheus, Grafana,
+and similar tools are still the right place for live monitoring.
 
-## Requirements
+## Target Stack
 
-Required:
+Built for real-world shared hosting and WordPress infrastructure:
 
-- Linux
-- Bash
-- systemd for timer-based installation
-- Standard tools such as `awk`, `sed`, `ps`, `date`, `find`, and `sort`
+- AlmaLinux 8
+- cPanel
+- Apache
+- CloudLinux
+- `mod_lsapi`
+- `lsphp`
+- MariaDB
+- Exim
+- Cloudflare proxy
+- WordPress workloads
 
-Optional diagnostics:
+The collector is generic enough to run on many Linux web servers, but the panic
+snapshots are tuned for cPanel-style hosting stacks.
 
-- `mysqladmin`
-- `exim`
-- `ss`
-- `lsof`
-- `vmstat`
-- `iostat`
-- `journalctl`
-- `apachectl`
-- `tar`
+## Highlights
 
-Missing optional commands are skipped gracefully.
+- Tiny normal overhead
+- One lightweight sample per minute
+- Panic mode only when thresholds trip
+- Incident folders with rich diagnostic snapshots
+- Graceful fallback when optional commands are missing
+- systemd timer installation
+- Clean uninstall
+- ShellCheck and `shfmt` CI checks
+- Plain Bash, no heavy runtime dependencies
 
-## Installation
+## Quick Start
 
-Run from the project directory as root:
+Clone and install as root:
 
 ```bash
+git clone https://github.com/Dr-Hack/Server-Forensics-Recorder.git
+cd Server-Forensics-Recorder
 sudo bash install.sh
 ```
-
-The installer:
-
-- Copies scripts to `/opt/server-forensics`
-- Installs configuration at `/etc/server-forensics/config.conf`
-- Creates `/var/log/server-forensics`
-- Installs and enables the systemd timer
-- Starts the timer
-- Verifies the installed files
 
 Check the timer:
 
@@ -96,116 +74,79 @@ systemctl list-timers server-forensics.timer
 systemctl status server-forensics.timer
 ```
 
-Run manually:
+Run one watcher cycle manually:
 
 ```bash
 sudo /opt/server-forensics/scripts/watcher.sh
 ```
 
-## Uninstall
-
-Preserve logs:
-
-```bash
-sudo bash uninstall.sh
-```
-
-Delete logs too:
-
-```bash
-sudo bash uninstall.sh --delete-logs
-```
-
-## Configuration
-
-Edit:
-
-```bash
-/etc/server-forensics/config.conf
-```
-
-Default values:
-
-```bash
-INTERVAL=60
-LOAD_THRESHOLD=10
-LSPHP_THRESHOLD=40
-MEMORY_THRESHOLD_MB=500
-ESTABLISHED_THRESHOLD=300
-DSTATE_THRESHOLD=5
-PANIC_COOLDOWN=300
-KEEP_INCIDENTS=100
-LOG_DIR=/var/log/server-forensics
-```
-
-Additional panic controls:
-
-```bash
-PANIC_SNAPSHOT_INTERVAL=10
-PANIC_COMMAND_TIMEOUT=20
-```
-
-## Lightweight Metrics
-
-Each normal sample is appended to:
-
-```bash
-/var/log/server-forensics/current.log
-```
-
-Example line:
+Logs and incidents are written to:
 
 ```text
-timestamp=2026-07-18T17:30:25+0500 epoch=1784381425 uptime_seconds=90125 load1=12.33 load5=8.44 load15=6.10 cpu_busy_pct=22.8 mem_total_mb=32000 mem_available_mb=420 swap_total_mb=4095 swap_free_mb=3800 apache_workers=87 lsphp_count=51 lsphp_avg_age=42 lsphp_oldest_age=300 mariadb_running=1 threads_running=3 threads_connected=44 exim_queue=12 tcp_established=344 tcp_time_wait=91 tcp_close_wait=3 tcp_syn_recv=0 dstate_processes=1
+/var/log/server-forensics/
 ```
 
-Collected metrics include:
+## How It Works
+
+Normal path:
+
+```text
+systemd timer
+  -> watcher
+  -> lightweight metrics
+  -> current.log
+  -> exit if healthy
+```
+
+Panic path:
+
+```text
+threshold crossed
+  -> create incident
+  -> capture snapshot every 10 seconds
+  -> keep capturing until recovery
+  -> write summary
+  -> rotate old incidents
+```
+
+The normal collector reads mostly from `/proc`. Expensive commands such as
+`lsof`, `journalctl`, `top`, `vmstat`, `iostat`, full process listings, and
+MariaDB process lists are used only in panic mode.
+
+## Collected Lightweight Metrics
+
+Each normal sample is appended to `current.log` as a single key-value line.
+
+Examples of collected fields:
 
 - Timestamp and uptime
 - Load average
-- CPU busy percentage since boot
+- CPU busy percentage
 - Memory and swap
 - Apache worker count
-- `lsphp` process count and age
-- MariaDB process presence
-- MariaDB thread counts when `mysqladmin` is available
-- Exim queue size when `exim` is available
-- TCP state summary from `/proc/net/tcp*`
+- `lsphp` process count
+- Average and oldest `lsphp` age
+- MariaDB running state
+- MariaDB thread counts when available
+- Exim queue size when available
+- TCP state summary
 - Processes in uninterruptible `D` state
 
-## Incident Lifecycle
-
-An incident starts when any threshold is crossed:
-
-- Load average above `LOAD_THRESHOLD`
-- `lsphp` count above `LSPHP_THRESHOLD`
-- Available memory below `MEMORY_THRESHOLD_MB`
-- Established TCP connections above `ESTABLISHED_THRESHOLD`
-- D-state process count above `DSTATE_THRESHOLD`
-
-Example flow:
+Example:
 
 ```text
-Load rises
-  -> watcher detects unhealthy sample
-  -> incident directory is created
-  -> panic snapshots are captured every 10 seconds
-  -> lightweight metrics continue to be appended
-  -> server becomes healthy
-  -> incident summary is finalized
+timestamp=2026-07-18T17:30:25+0500 load1=12.33 mem_available_mb=420 lsphp_count=51 tcp_established=344 dstate_processes=1
 ```
 
-Panic mode never creates duplicate incidents while one is active. After recovery, `PANIC_COOLDOWN` prevents immediate re-entry during short flapping periods.
+## Panic Snapshots
 
-## Example Incident
-
-Incident directory:
+When the watcher detects an unhealthy sample, it creates an incident directory:
 
 ```text
 /var/log/server-forensics/incidents/incident-20260718-173025/
 ```
 
-Files:
+Typical files:
 
 ```text
 summary.txt
@@ -214,22 +155,7 @@ snapshot-2.log
 snapshot-3.log
 ```
 
-Summary example:
-
-```text
-Incident ID: incident-20260718-173025
-Started: 2026-07-18T17:30:25+0500
-Ended: 2026-07-18T17:33:05+0500
-Duration: 160 seconds
-Peak Load: 18.42
-Peak lsphp: 76
-Lowest Available Memory: 214 MB
-Peak Connections: 512 established
-Reason Triggered: load1=12.33>10,lsphp=51>40
-Snapshots Taken: 16
-```
-
-Each snapshot includes:
+Snapshot diagnostics include:
 
 - `date`
 - `uptime`
@@ -247,87 +173,78 @@ Each snapshot includes:
 - `mysqladmin status`
 - `apachectl status`
 
-## Example Screenshots
+Missing commands are skipped gracefully and recorded in the snapshot.
 
-This project is terminal-first, so screenshots are usually captures of incident folders and summaries:
+## Configuration
 
-```text
-$ ls -lah /var/log/server-forensics/incidents/incident-20260718-173025/
-summary.txt
-snapshot-1.log
-snapshot-2.log
-snapshot-3.log
-```
+Default config file:
 
 ```text
-$ sed -n '1,20p' /var/log/server-forensics/incidents/incident-20260718-173025/summary.txt
-Incident ID: incident-20260718-173025
-Started: 2026-07-18T17:30:25+0500
-Ended: 2026-07-18T17:33:05+0500
-Duration: 160 seconds
-...
+/etc/server-forensics/config.conf
 ```
 
-## Tuning Thresholds
-
-Start conservative and adjust from real `current.log` data:
-
-- `LOAD_THRESHOLD`: Set above normal peak load. On busy shared hosting servers, this may be higher than CPU core count because short queue spikes are common.
-- `LSPHP_THRESHOLD`: Tune from normal `lsphp_count` during traffic peaks. WordPress floods often show up here first.
-- `MEMORY_THRESHOLD_MB`: Set to the point where the server is close to swap pressure or OOM behavior.
-- `ESTABLISHED_THRESHOLD`: Tune from normal Cloudflare-proxied traffic. Use this to catch connection pileups.
-- `DSTATE_THRESHOLD`: Keep low. D-state processes often indicate storage or kernel-level stalls.
-- `PANIC_COMMAND_TIMEOUT`: Lower this if snapshots are too heavy during outages.
-
-## Troubleshooting
-
-No logs are appearing:
+Important defaults:
 
 ```bash
-systemctl status server-forensics.timer
-systemctl status server-forensics.service
-journalctl -u server-forensics.service --no-pager
+INTERVAL=60
+LOAD_THRESHOLD=10
+LSPHP_THRESHOLD=40
+MEMORY_THRESHOLD_MB=500
+ESTABLISHED_THRESHOLD=300
+DSTATE_THRESHOLD=5
+PANIC_COOLDOWN=300
+KEEP_INCIDENTS=100
+LOG_DIR=/var/log/server-forensics
 ```
 
-Permission errors:
+Panic controls:
 
-- Run the installer as root.
-- Panic diagnostics such as `lsof`, `dmesg`, and `journalctl` may require root.
+```bash
+PANIC_SNAPSHOT_INTERVAL=10
+PANIC_COMMAND_TIMEOUT=20
+```
 
-MariaDB fields show `NA`:
+Tune thresholds from real `current.log` values on your server. Start
+conservative, then adjust based on normal peak traffic.
 
-- `mysqladmin` may not be installed.
-- The root account may require a defaults file or socket authentication.
-- This does not stop the recorder.
+## Repository Layout
 
-No `iostat` output:
+```text
+server-forensics/
+|-- README.md
+|-- DESIGN.md
+|-- CHANGELOG.md
+|-- LICENSE
+|-- config.conf
+|-- install.sh
+|-- uninstall.sh
+|-- docs/
+|   |-- architecture.md
+|   |-- installation.md
+|   `-- troubleshooting.md
+|-- tests/
+|   |-- syntax.sh
+|   |-- lint.sh
+|   |-- format.sh
+|   `-- systemd.sh
+|-- scripts/
+|   |-- collector.sh
+|   |-- watcher.sh
+|   |-- panic.sh
+|   `-- rotate.sh
+|-- lib/
+|   |-- metrics.sh
+|   |-- logging.sh
+|   |-- incident.sh
+|   `-- utils.sh
+`-- systemd/
+    |-- service
+    `-- timer
+```
 
-- Install `sysstat` if you want disk device diagnostics in panic snapshots.
+## Development Checks
 
-`apachectl status` fails:
-
-- Apache status depends on local server-status configuration.
-- Failure is recorded but ignored.
-
-## Coding Standards
-
-The project is written as small Bash modules:
-
-- `lib/utils.sh`
-- `lib/logging.sh`
-- `lib/metrics.sh`
-- `lib/incident.sh`
-
-Scripts use:
-
-- `set -Eeuo pipefail`
-- Defensive command checks
-- Short timeouts around optional commands
-- Simple key-value log output
-- Graceful degradation when commands are missing
-- Functions instead of monolithic script bodies
-
-Run checks:
+Run locally:
 
 ```bash
 bash tests/syntax.sh
@@ -336,17 +253,39 @@ bash tests/format.sh
 bash tests/systemd.sh
 ```
 
-GitHub Actions runs these checks automatically on pushes and pull requests:
+GitHub Actions runs:
 
-- ShellCheck linting
-- `bash -n` syntax checks
-- `shfmt` formatting verification
+- ShellCheck
+- `bash -n`
+- `shfmt`
 - systemd unit validation
-- explicit installer syntax checks
+- installer syntax checks
+
+## Documentation
+
+- [Design background](DESIGN.md)
+- [Architecture](docs/architecture.md)
+- [Installation](docs/installation.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Changelog](CHANGELOG.md)
+
+## Uninstall
+
+Preserve logs:
+
+```bash
+sudo bash uninstall.sh
+```
+
+Delete logs too:
+
+```bash
+sudo bash uninstall.sh --delete-logs
+```
 
 ## Roadmap
 
-Not planned for v1:
+Not planned for v1, but good future directions:
 
 - Email notifications
 - Slack, Discord, or webhook alerts
@@ -360,6 +299,14 @@ Not planned for v1:
 - Multi-server aggregation
 - Optional Python rewrite for advanced analysis
 
+## Author
+
+Created and maintained by **Dr-Hack**.
+
+Website: [https://hackology.co](https://hackology.co)
+
+GitHub: [https://github.com/Dr-Hack](https://github.com/Dr-Hack)
+
 ## License
 
-MIT License. See `LICENSE`.
+MIT License. See [LICENSE](LICENSE).
