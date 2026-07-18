@@ -1,0 +1,16 @@
+[Unit]
+Description=Server Forensics Recorder watcher
+Documentation=file:/opt/server-forensics/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=SF_CONFIG=/etc/server-forensics/config.conf
+ExecStart=/opt/server-forensics/scripts/watcher.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target

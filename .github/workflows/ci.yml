@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shell:
+    name: Shell and systemd checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go for shfmt
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Install tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          go install mvdan.cc/sh/v3/cmd/shfmt@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Run ShellCheck
+        run: bash tests/lint.sh
+
+      - name: Run bash syntax checks
+        run: bash tests/syntax.sh
+
+      - name: Check shfmt formatting
+        run: bash tests/format.sh
+
+      - name: Validate systemd unit files
+        run: bash tests/systemd.sh
+
+      - name: Check installer syntax explicitly
+        run: bash -n install.sh uninstall.sh

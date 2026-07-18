@@ -1,0 +1,15 @@
+# Runtime logs and incident archives
+logs/
+*.log
+*.tar.gz
+
+# Local editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.code-workspace
+
+# Temporary files
+*.tmp
+*.swp

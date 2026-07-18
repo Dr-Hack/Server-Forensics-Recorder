@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Server Forensics Recorder every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=60
+AccuracySec=5s
+Unit=server-forensics.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

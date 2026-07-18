@@ -1,0 +1,84 @@
+# Installation
+
+Install as root from the repository root:
+
+```bash
+sudo bash install.sh
+```
+
+The installer copies source files to:
+
+```text
+/opt/server-forensics
+```
+
+Configuration is installed to:
+
+```text
+/etc/server-forensics/config.conf
+```
+
+Logs are written to:
+
+```text
+/var/log/server-forensics
+```
+
+## systemd
+
+Installed units:
+
+```text
+/etc/systemd/system/server-forensics.service
+/etc/systemd/system/server-forensics.timer
+```
+
+The timer runs the watcher once per minute:
+
+```bash
+systemctl status server-forensics.timer
+systemctl list-timers server-forensics.timer
+```
+
+Manual watcher run:
+
+```bash
+sudo /opt/server-forensics/scripts/watcher.sh
+```
+
+## Development Checks
+
+Before opening a pull request, run:
+
+```bash
+bash tests/syntax.sh
+bash tests/lint.sh
+bash tests/format.sh
+bash tests/systemd.sh
+```
+
+The GitHub Actions workflow runs the same checks automatically.
+
+## Configuration
+
+Edit:
+
+```bash
+sudo vi /etc/server-forensics/config.conf
+```
+
+Then either wait for the next timer run or run the watcher manually.
+
+## Uninstall
+
+Preserve logs:
+
+```bash
+sudo bash uninstall.sh
+```
+
+Delete logs:
+
+```bash
+sudo bash uninstall.sh --delete-logs
+```
