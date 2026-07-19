@@ -8,6 +8,8 @@ source "${ROOT_DIR}/lib/utils.sh"
 load_config
 # shellcheck source=../lib/logging.sh
 source "${ROOT_DIR}/lib/logging.sh"
+# shellcheck source=../lib/plugins.sh
+source "${ROOT_DIR}/lib/plugins.sh"
 # shellcheck source=../lib/metrics.sh
 source "${ROOT_DIR}/lib/metrics.sh"
 # shellcheck source=../lib/incident.sh
@@ -17,7 +19,7 @@ main() {
     log_init
 
     local line reason panic_script
-    line="$(collect_metrics_line)"
+    line="$(bash "${SCRIPT_DIR}/collector.sh" --print)"
     printf '%s\n' "$line" >>"$CURRENT_LOG"
 
     if ! reason="$(metrics_unhealthy_reason "$line")"; then

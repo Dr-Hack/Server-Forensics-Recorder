@@ -8,6 +8,8 @@ source "${ROOT_DIR}/lib/utils.sh"
 load_config
 # shellcheck source=../lib/logging.sh
 source "${ROOT_DIR}/lib/logging.sh"
+# shellcheck source=../lib/plugins.sh
+source "${ROOT_DIR}/lib/plugins.sh"
 # shellcheck source=../lib/metrics.sh
 source "${ROOT_DIR}/lib/metrics.sh"
 # shellcheck source=../lib/incident.sh
@@ -116,12 +118,40 @@ capture_snapshot() {
     log_warn "captured panic snapshot ${index}: ${file}"
 }
 
+capture_test_snapshot() {
+    local dir="$1"
+    local metric_line="$2"
+    local file="${dir}/snapshot-1.log"
+
+    {
+        printf 'Server Forensics Test Panic Snapshot\n'
+        printf 'created_at=%s\n' "$(now_iso)"
+        printf 'mode=test-panic\n'
+        printf '\nLightweight metrics:\n%s\n' "$metric_line"
+        printf '\nNo expensive diagnostics were executed in test-panic mode.\n'
+    } >"$file"
+
+    incident_increment_snapshots "$dir" >/dev/null
+}
+
 main() {
     log_init
 
     local reason="${1:-manual}"
     local metric_line="${2:-}"
     local dir index
+    local test_panic=0
+
+    if [[ "$reason" == "--test-panic" ]]; then
+        test_panic=1
+        reason="test-panic"
+        metric_line=""
+    fi
+
+    if [[ "$test_panic" -eq 1 ]] && incident_active_dir >/dev/null; then
+        log_error "refusing test panic while a real incident is active"
+        return 1
+    fi
 
     if [[ -z "$metric_line" ]]; then
         metric_line="$(collect_metrics_line)"
@@ -130,6 +160,14 @@ main() {
 
     dir="$(incident_start "$reason" "$metric_line")"
     log_warn "panic mode active: ${dir}"
+
+    if [[ "$test_panic" -eq 1 ]]; then
+        capture_test_snapshot "$dir" "$metric_line"
+        incident_close "$dir" "$metric_line"
+        log_warn "test panic incident created and closed: ${dir}"
+        printf '%s\n' "$dir"
+        return 0
+    fi
 
     index="$(incident_meta_get "$dir" snapshots 0)"
     index=$((index + 1))

@@ -80,6 +80,16 @@ Run one watcher cycle manually:
 sudo /opt/server-forensics/scripts/watcher.sh
 ```
 
+Operational checks:
+
+```bash
+server-forensics --version
+server-forensics --health
+server-forensics --health-json
+sudo server-forensics --doctor
+sudo server-forensics --test-panic
+```
+
 Logs and incidents are written to:
 
 ```text
@@ -93,6 +103,7 @@ Normal path:
 ```text
 systemd timer
   -> watcher
+  -> collector --print
   -> lightweight metrics
   -> current.log
   -> exit if healthy
@@ -203,10 +214,26 @@ Panic controls:
 PANIC_SNAPSHOT_INTERVAL=10
 PANIC_COMMAND_TIMEOUT=20
 PANIC_OUTPUT_LINES=5000
+COLLECTOR_COMMAND_TIMEOUT=1
+ENABLE_PLUGINS=1
+PLUGIN_TIMEOUT=1
+PLUGIN_DIRS=/opt/server-forensics/plugins/metrics:/etc/server-forensics/plugins/metrics
 ```
 
 Tune thresholds from real `current.log` values on your server. Start
 conservative, then adjust based on normal peak traffic.
+
+## Metric Plugins
+
+Optional lightweight collector plugins live in:
+
+```text
+/opt/server-forensics/plugins/metrics/
+/etc/server-forensics/plugins/metrics/
+```
+
+Each plugin prints key-value pairs on one line. Plugins run in the normal
+collector path, so they must be fast and must not call expensive diagnostics.
 
 ## Repository Layout
 
@@ -215,12 +242,15 @@ server-forensics/
 |-- README.md
 |-- DESIGN.md
 |-- CHANGELOG.md
+|-- CONTRIBUTING.md
+|-- SECURITY.md
 |-- LICENSE
 |-- config.conf
 |-- install.sh
 |-- uninstall.sh
 |-- docs/
 |   |-- architecture.md
+|   |-- configuration.md
 |   |-- installation.md
 |   `-- troubleshooting.md
 |-- tests/
@@ -237,7 +267,10 @@ server-forensics/
 |   |-- metrics.sh
 |   |-- logging.sh
 |   |-- incident.sh
+|   |-- plugins.sh
 |   `-- utils.sh
+|-- plugins/
+|   `-- metrics/
 `-- systemd/
     |-- service
     `-- timer
@@ -266,8 +299,11 @@ GitHub Actions runs:
 
 - [Design background](DESIGN.md)
 - [Architecture](docs/architecture.md)
+- [Configuration](docs/configuration.md)
 - [Installation](docs/installation.md)
 - [Troubleshooting](docs/troubleshooting.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security](SECURITY.md)
 - [Changelog](CHANGELOG.md)
 
 ## Uninstall

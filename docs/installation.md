@@ -46,6 +46,16 @@ Manual watcher run:
 sudo /opt/server-forensics/scripts/watcher.sh
 ```
 
+Installed CLI:
+
+```bash
+server-forensics --version
+server-forensics --health
+server-forensics --health-json
+sudo server-forensics --doctor
+sudo server-forensics --test-panic
+```
+
 ## Development Checks
 
 Before opening a pull request, run:

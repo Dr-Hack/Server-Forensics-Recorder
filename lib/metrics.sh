@@ -85,7 +85,7 @@ read_mysql_thread_fields() {
     fi
 
     local output
-    if ! output="$(run_with_timeout 2 mysqladmin --connect-timeout=1 extended-status 2>/dev/null)"; then
+    if ! output="$(run_with_timeout "$COLLECTOR_COMMAND_TIMEOUT" mysqladmin --connect-timeout=1 extended-status 2>/dev/null)"; then
         printf 'NA NA\n'
         return 0
     fi
@@ -114,7 +114,7 @@ read_exim_queue() {
     fi
 
     local output
-    if output="$(run_with_timeout 2 exim -bpc 2>/dev/null)"; then
+    if output="$(run_with_timeout "$COLLECTOR_COMMAND_TIMEOUT" exim -bpc 2>/dev/null)"; then
         trim "$output"
     else
         printf 'NA\n'
@@ -162,12 +162,12 @@ collect_metrics_line() {
     read -r tcp_established tcp_time_wait tcp_close_wait tcp_syn_recv <<<"$(read_tcp_summary)"
     dstate="$(read_dstate_processes)"
 
-    printf 'timestamp=%s epoch=%s uptime_seconds=%s load1=%s load5=%s load15=%s cpu_busy_pct=%s mem_total_mb=%s mem_available_mb=%s swap_total_mb=%s swap_free_mb=%s apache_workers=%s lsphp_count=%s lsphp_avg_age=%s lsphp_oldest_age=%s mariadb_running=%s threads_running=%s threads_connected=%s exim_queue=%s tcp_established=%s tcp_time_wait=%s tcp_close_wait=%s tcp_syn_recv=%s dstate_processes=%s\n' \
+    printf 'timestamp=%s epoch=%s uptime_seconds=%s load1=%s load5=%s load15=%s cpu_busy_pct=%s mem_total_mb=%s mem_available_mb=%s swap_total_mb=%s swap_free_mb=%s apache_workers=%s lsphp_count=%s lsphp_avg_age=%s lsphp_oldest_age=%s mariadb_running=%s threads_running=%s threads_connected=%s exim_queue=%s tcp_established=%s tcp_time_wait=%s tcp_close_wait=%s tcp_syn_recv=%s dstate_processes=%s%s\n' \
         "$timestamp" "$epoch" "$uptime" "$load1" "$load5" "$load15" "$cpu_busy" \
         "$mem_total" "$mem_available" "$swap_total" "$swap_free" "$apache_workers" \
         "$lsphp_count" "$lsphp_avg_age" "$lsphp_oldest_age" "$mariadb_running" \
         "$threads_running" "$threads_connected" "$exim_queue" "$tcp_established" \
-        "$tcp_time_wait" "$tcp_close_wait" "$tcp_syn_recv" "$dstate"
+        "$tcp_time_wait" "$tcp_close_wait" "$tcp_syn_recv" "$dstate" "$(collect_plugin_metrics)"
 }
 
 metrics_unhealthy_reason() {

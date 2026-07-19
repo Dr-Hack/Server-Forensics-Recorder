@@ -12,3 +12,6 @@ All notable changes to this project will be documented in this file.
 - Added GitHub-ready repository layout with docs and syntax test.
 - Added ShellCheck, shfmt, Bash syntax, installer syntax, and systemd unit checks through GitHub Actions.
 - Added safer uninstall markers and panic snapshot output caps for production deployment.
+- Added CLI commands for version, health, doctor, and safe test panic mode.
+- Added validated configuration and lightweight metric plugin support.
+- Added contribution, security, issue, and pull request templates.

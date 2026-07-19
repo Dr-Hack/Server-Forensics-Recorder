@@ -2,6 +2,8 @@
 # Shared utility functions for server-forensics.
 # shellcheck disable=SC2034
 
+SERVER_FORENSICS_VERSION="0.1.0"
+
 sf_root() {
     if [[ -n "${SF_ROOT:-}" ]]; then
         printf '%s\n' "$SF_ROOT"
@@ -16,6 +18,13 @@ sf_root() {
 sf_bool() {
     case "${1:-0}" in
         1 | true | TRUE | yes | YES | on | ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+sf_is_bool_value() {
+    case "${1:-}" in
+        0 | 1 | true | TRUE | false | FALSE | yes | YES | no | NO | on | ON | off | OFF) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -63,9 +72,13 @@ load_config() {
     DEBUG="${DEBUG:-0}"
     VERBOSE="${VERBOSE:-1}"
     QUIET="${QUIET:-0}"
+    COLLECTOR_COMMAND_TIMEOUT="${COLLECTOR_COMMAND_TIMEOUT:-1}"
     PANIC_SNAPSHOT_INTERVAL="${PANIC_SNAPSHOT_INTERVAL:-10}"
     PANIC_COMMAND_TIMEOUT="${PANIC_COMMAND_TIMEOUT:-20}"
     PANIC_OUTPUT_LINES="${PANIC_OUTPUT_LINES:-5000}"
+    ENABLE_PLUGINS="${ENABLE_PLUGINS:-1}"
+    PLUGIN_TIMEOUT="${PLUGIN_TIMEOUT:-1}"
+    PLUGIN_DIRS="${PLUGIN_DIRS:-${SF_ROOT}/plugins/metrics:/etc/server-forensics/plugins/metrics}"
 
     local bundled_config="${SF_ROOT}/config.conf"
     local system_config="/etc/server-forensics/config.conf"
@@ -91,6 +104,72 @@ load_config() {
     STATE_DIR="${LOG_DIR}/.state"
     CURRENT_LOG="${LOG_DIR}/current.log"
     DAEMON_LOG="${LOG_DIR}/server-forensics.log"
+
+    validate_config
+}
+
+fail_config() {
+    printf 'Configuration error: %s\n' "$*" >&2
+    return 1
+}
+
+is_uint() {
+    [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+is_number() {
+    [[ "${1:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]
+}
+
+validate_path_value() {
+    local name="$1"
+    local value="$2"
+
+    [[ -n "$value" ]] || fail_config "$name must not be empty"
+    [[ "$value" == /* ]] || fail_config "$name must be an absolute path: $value"
+
+    case "$value" in
+        "/" | "/bin" | "/boot" | "/dev" | "/etc" | "/home" | "/lib" | "/lib64" | "/opt" | "/proc" | "/root" | "/run" | "/sbin" | "/sys" | "/tmp" | "/usr" | "/var" | "/var/log")
+            fail_config "$name is too broad: $value"
+            ;;
+    esac
+}
+
+validate_config() {
+    local plugin_dir
+
+    is_uint "$INTERVAL" || fail_config "INTERVAL must be a non-negative integer"
+    [[ "$INTERVAL" -ge 10 ]] || fail_config "INTERVAL must be at least 10 seconds"
+
+    is_number "$LOAD_THRESHOLD" || fail_config "LOAD_THRESHOLD must be numeric"
+    is_uint "$LSPHP_THRESHOLD" || fail_config "LSPHP_THRESHOLD must be a non-negative integer"
+    is_uint "$MEMORY_THRESHOLD_MB" || fail_config "MEMORY_THRESHOLD_MB must be a non-negative integer"
+    is_uint "$ESTABLISHED_THRESHOLD" || fail_config "ESTABLISHED_THRESHOLD must be a non-negative integer"
+    is_uint "$DSTATE_THRESHOLD" || fail_config "DSTATE_THRESHOLD must be a non-negative integer"
+    is_uint "$PANIC_COOLDOWN" || fail_config "PANIC_COOLDOWN must be a non-negative integer"
+    is_uint "$KEEP_INCIDENTS" || fail_config "KEEP_INCIDENTS must be a non-negative integer"
+    is_uint "$COLLECTOR_COMMAND_TIMEOUT" || fail_config "COLLECTOR_COMMAND_TIMEOUT must be a non-negative integer"
+    [[ "$COLLECTOR_COMMAND_TIMEOUT" -ge 1 ]] || fail_config "COLLECTOR_COMMAND_TIMEOUT must be at least 1 second"
+    is_uint "$PANIC_SNAPSHOT_INTERVAL" || fail_config "PANIC_SNAPSHOT_INTERVAL must be a non-negative integer"
+    [[ "$PANIC_SNAPSHOT_INTERVAL" -ge 1 ]] || fail_config "PANIC_SNAPSHOT_INTERVAL must be at least 1 second"
+    is_uint "$PANIC_COMMAND_TIMEOUT" || fail_config "PANIC_COMMAND_TIMEOUT must be a non-negative integer"
+    [[ "$PANIC_COMMAND_TIMEOUT" -ge 1 ]] || fail_config "PANIC_COMMAND_TIMEOUT must be at least 1 second"
+    is_uint "$PANIC_OUTPUT_LINES" || fail_config "PANIC_OUTPUT_LINES must be a non-negative integer"
+    [[ "$PANIC_OUTPUT_LINES" -ge 100 ]] || fail_config "PANIC_OUTPUT_LINES must be at least 100"
+
+    validate_path_value LOG_DIR "$LOG_DIR"
+
+    while IFS= read -r plugin_dir; do
+        [[ -n "$plugin_dir" ]] || continue
+        [[ "$plugin_dir" == /* ]] || fail_config "PLUGIN_DIRS entries must be absolute paths: $plugin_dir"
+    done < <(printf '%s\n' "$PLUGIN_DIRS" | tr ':' '\n')
+
+    if ! sf_is_bool_value "$ENABLE_PLUGINS"; then
+        fail_config "ENABLE_PLUGINS must be 0, 1, true, false, yes, no, on, or off"
+    fi
+
+    is_uint "$PLUGIN_TIMEOUT" || fail_config "PLUGIN_TIMEOUT must be a non-negative integer"
+    [[ "$PLUGIN_TIMEOUT" -ge 1 ]] || fail_config "PLUGIN_TIMEOUT must be at least 1 second"
 }
 
 metric_value() {

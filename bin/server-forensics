@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+# shellcheck source=../lib/utils.sh
+source "${ROOT_DIR}/lib/utils.sh"
+load_config
+# shellcheck source=../lib/logging.sh
+source "${ROOT_DIR}/lib/logging.sh"
+# shellcheck source=../lib/plugins.sh
+source "${ROOT_DIR}/lib/plugins.sh"
+# shellcheck source=../lib/metrics.sh
+source "${ROOT_DIR}/lib/metrics.sh"
+# shellcheck source=../lib/incident.sh
+source "${ROOT_DIR}/lib/incident.sh"
+
+usage() {
+    cat <<'USAGE'
+Usage: server-forensics COMMAND
+
+Commands:
+  --version      Print version information.
+  --health       Print current timer, log, incident, and config status.
+  --health-json  Print current health as JSON.
+  --doctor       Validate config, permissions, dependencies, and systemd state.
+  --test-panic   Create and close a safe test incident without expensive diagnostics.
+  --watch        Run one watcher cycle.
+  --collect      Run one collector cycle.
+  --help         Show this help.
+USAGE
+}
+
+status_value() {
+    local label="$1"
+    local value="$2"
+    printf '%-24s %s\n' "$label:" "$value"
+}
+
+systemctl_value() {
+    local property="$1"
+    local unit="$2"
+
+    if command_exists systemctl; then
+        systemctl show --property="$property" --value "$unit" 2>/dev/null || printf 'unknown\n'
+    else
+        printf 'systemctl unavailable\n'
+    fi
+}
+
+latest_incident() {
+    find "$INCIDENT_DIR" -mindepth 1 -maxdepth 1 -type d -name 'incident-*' 2>/dev/null | sort | tail -n 1
+}
+
+cmd_version() {
+    printf 'name=server-forensics\n'
+    printf 'version=%s\n' "$SERVER_FORENSICS_VERSION"
+    printf 'install_dir=%s\n' "$ROOT_DIR"
+    printf 'config=%s\n' "${SF_CONFIG:-/etc/server-forensics/config.conf}"
+}
+
+cmd_health() {
+    local last_line last_incident active_incident
+
+    last_line="$(tail -n 1 "$CURRENT_LOG" 2>/dev/null || true)"
+    active_incident="$(incident_active_dir 2>/dev/null || true)"
+    last_incident="$(latest_incident)"
+
+    cmd_version
+    status_value "timer-active" "$(systemctl_value ActiveState server-forensics.timer)"
+    status_value "service-active" "$(systemctl_value ActiveState server-forensics.service)"
+    status_value "timer-next" "$(systemctl_value NextElapseUSecRealtime server-forensics.timer)"
+    status_value "log-dir" "$LOG_DIR"
+    status_value "current-log" "$CURRENT_LOG"
+    status_value "last-run" "$(metric_value "$last_line" timestamp)"
+    status_value "active-incident" "${active_incident:-none}"
+    status_value "last-incident" "${last_incident:-none}"
+    status_value "load-threshold" "$LOAD_THRESHOLD"
+    status_value "lsphp-threshold" "$LSPHP_THRESHOLD"
+    status_value "memory-threshold-mb" "$MEMORY_THRESHOLD_MB"
+    status_value "established-threshold" "$ESTABLISHED_THRESHOLD"
+    status_value "dstate-threshold" "$DSTATE_THRESHOLD"
+    status_value "panic-cooldown" "$PANIC_COOLDOWN"
+    status_value "keep-incidents" "$KEEP_INCIDENTS"
+    status_value "plugins-enabled" "$ENABLE_PLUGINS"
+    status_value "plugin-dirs" "$PLUGIN_DIRS"
+}
+
+json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    printf '%s' "$value"
+}
+
+json_pair() {
+    local key="$1"
+    local value="$2"
+    local suffix=","
+    if [[ "$#" -ge 3 ]]; then
+        suffix="$3"
+    fi
+    printf '  "%s": "%s"%s\n' "$(json_escape "$key")" "$(json_escape "$value")" "$suffix"
+}
+
+cmd_health_json() {
+    local last_line last_incident active_incident
+
+    last_line="$(tail -n 1 "$CURRENT_LOG" 2>/dev/null || true)"
+    active_incident="$(incident_active_dir 2>/dev/null || true)"
+    last_incident="$(latest_incident)"
+
+    printf '{\n'
+    json_pair "name" "server-forensics"
+    json_pair "version" "$SERVER_FORENSICS_VERSION"
+    json_pair "timer_active" "$(systemctl_value ActiveState server-forensics.timer)"
+    json_pair "service_active" "$(systemctl_value ActiveState server-forensics.service)"
+    json_pair "log_dir" "$LOG_DIR"
+    json_pair "current_log" "$CURRENT_LOG"
+    json_pair "last_run" "$(metric_value "$last_line" timestamp)"
+    json_pair "active_incident" "${active_incident:-none}"
+    json_pair "last_incident" "${last_incident:-none}"
+    json_pair "load_threshold" "$LOAD_THRESHOLD"
+    json_pair "lsphp_threshold" "$LSPHP_THRESHOLD"
+    json_pair "memory_threshold_mb" "$MEMORY_THRESHOLD_MB"
+    json_pair "established_threshold" "$ESTABLISHED_THRESHOLD"
+    json_pair "dstate_threshold" "$DSTATE_THRESHOLD"
+    json_pair "plugins_enabled" "$ENABLE_PLUGINS"
+    json_pair "plugin_dirs" "$PLUGIN_DIRS" ""
+    printf '}\n'
+}
+
+check_command() {
+    local name="$1"
+    if command_exists "$name"; then
+        printf 'OK   command: %s\n' "$name"
+    else
+        printf 'WARN command missing: %s\n' "$name"
+    fi
+}
+
+check_writable_dir() {
+    local dir="$1"
+    if [[ -d "$dir" && -w "$dir" ]]; then
+        printf 'OK   writable: %s\n' "$dir"
+    else
+        printf 'FAIL not writable: %s\n' "$dir"
+        return 1
+    fi
+}
+
+cmd_doctor() {
+    local failures=0
+
+    printf 'server-forensics doctor\n'
+    printf 'version=%s\n' "$SERVER_FORENSICS_VERSION"
+    printf 'config=ok\n'
+
+    check_writable_dir "$LOG_DIR" || failures=$((failures + 1))
+    check_writable_dir "$INCIDENT_DIR" || failures=$((failures + 1))
+    check_writable_dir "$ARCHIVE_DIR" || failures=$((failures + 1))
+    check_writable_dir "$STATE_DIR" || failures=$((failures + 1))
+
+    check_command bash
+    check_command awk
+    check_command ps
+    check_command find
+    check_command sort
+    check_command head
+    check_command timeout
+    check_command mysqladmin
+    check_command exim
+    check_command ss
+    check_command lsof
+    check_command vmstat
+    check_command iostat
+    check_command journalctl
+    check_command apachectl
+
+    if command_exists systemctl; then
+        printf 'OK   systemctl available\n'
+        printf 'INFO timer-active=%s\n' "$(systemctl_value ActiveState server-forensics.timer)"
+        printf 'INFO service-exec=%s\n' "$(systemctl_value ExecStart server-forensics.service)"
+    else
+        printf 'WARN systemctl unavailable\n'
+    fi
+
+    if [[ "$failures" -gt 0 ]]; then
+        printf 'doctor=fail failures=%s\n' "$failures"
+        return 1
+    fi
+
+    printf 'doctor=ok\n'
+}
+
+cmd_test_panic() {
+    "${ROOT_DIR}/scripts/panic.sh" --test-panic
+}
+
+main() {
+    case "${1:---help}" in
+        --version)
+            cmd_version
+            ;;
+        --health)
+            cmd_health
+            ;;
+        --health-json)
+            cmd_health_json
+            ;;
+        --doctor)
+            cmd_doctor
+            ;;
+        --test-panic)
+            cmd_test_panic
+            ;;
+        --watch)
+            "${ROOT_DIR}/scripts/watcher.sh"
+            ;;
+        --collect)
+            "${ROOT_DIR}/scripts/collector.sh"
+            ;;
+        --help | -h)
+            usage
+            ;;
+        *)
+            usage >&2
+            return 2
+            ;;
+    esac
+}
+
+main "$@"

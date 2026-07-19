@@ -6,6 +6,7 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/server-forensics}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/server-forensics}"
 CONFIG_FILE="${CONFIG_FILE:-${CONFIG_DIR}/config.conf}"
 LOG_DIR_DEFAULT="/var/log/server-forensics"
+BIN_DIR="${BIN_DIR:-/usr/local/sbin}"
 INSTALLED_LOG_DIR="$LOG_DIR_DEFAULT"
 INSTALL_MARKER=".server-forensics-install"
 CONFIG_MARKER=".server-forensics-config"
@@ -20,15 +21,21 @@ require_root() {
 
 copy_project() {
     mkdir -p "$INSTALL_DIR"
+    mkdir -p "$INSTALL_DIR/bin"
     cp -R "$PROJECT_DIR"/lib "$INSTALL_DIR"/
     cp -R "$PROJECT_DIR"/scripts "$INSTALL_DIR"/
     cp -R "$PROJECT_DIR"/docs "$INSTALL_DIR"/
+    cp -R "$PROJECT_DIR"/plugins "$INSTALL_DIR"/
+    cp "$PROJECT_DIR"/bin/server-forensics "$INSTALL_DIR"/bin/
     cp "$PROJECT_DIR"/config.conf "$INSTALL_DIR"/
     cp "$PROJECT_DIR"/README.md "$INSTALL_DIR"/
     cp "$PROJECT_DIR"/DESIGN.md "$INSTALL_DIR"/
     cp "$PROJECT_DIR"/CHANGELOG.md "$INSTALL_DIR"/
+    cp "$PROJECT_DIR"/CONTRIBUTING.md "$INSTALL_DIR"/
+    cp "$PROJECT_DIR"/SECURITY.md "$INSTALL_DIR"/
     cp "$PROJECT_DIR"/LICENSE "$INSTALL_DIR"/
     chmod 0755 "$INSTALL_DIR"/scripts/collector.sh "$INSTALL_DIR"/scripts/watcher.sh "$INSTALL_DIR"/scripts/panic.sh "$INSTALL_DIR"/scripts/rotate.sh
+    chmod 0755 "$INSTALL_DIR"/bin/server-forensics
     chmod 0644 "$INSTALL_DIR"/config.conf "$INSTALL_DIR"/lib/*.sh
     printf 'server-forensics install directory\n' >"$INSTALL_DIR/$INSTALL_MARKER"
 }
@@ -78,9 +85,15 @@ install_systemd() {
     systemctl enable --now server-forensics.timer
 }
 
+install_cli() {
+    mkdir -p "$BIN_DIR"
+    ln -sfn "$INSTALL_DIR/bin/server-forensics" "$BIN_DIR/server-forensics"
+}
+
 verify_installation() {
     test -x "$INSTALL_DIR/scripts/watcher.sh"
     test -x "$INSTALL_DIR/scripts/collector.sh"
+    test -x "$INSTALL_DIR/bin/server-forensics"
     test -f "$CONFIG_FILE"
 
     if command -v systemctl >/dev/null 2>&1; then
@@ -93,6 +106,7 @@ main() {
     copy_project
     install_config
     install_logs
+    install_cli
     install_systemd
     verify_installation
     printf 'server-forensics installed successfully.\n'
