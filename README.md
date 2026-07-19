@@ -132,13 +132,15 @@ Examples of collected fields:
 
 - Timestamp and uptime
 - Load average
-- CPU busy percentage
+- CPU busy percentage (delta of `/proc/stat` between samples; `NA` on the first
+  sample after boot)
 - Memory and swap
 - Apache worker count
 - `lsphp` process count
 - Average and oldest `lsphp` age
 - MariaDB running state
-- MariaDB thread counts when available
+- MariaDB `Threads_running`, `Threads_connected`, `Questions`, `Uptime`, and
+  `Slow_queries` when reachable (`NA` otherwise)
 - Exim queue size when available
 - TCP state summary
 - Processes in uninterruptible `D` state

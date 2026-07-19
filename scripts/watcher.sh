@@ -19,7 +19,7 @@ main() {
     log_init
 
     local line reason panic_script
-    line="$(bash "${SCRIPT_DIR}/collector.sh" --print)"
+    line="$(collect_metrics_line)"
     printf '%s\n' "$line" >>"$CURRENT_LOG"
 
     if ! reason="$(metrics_unhealthy_reason "$line")"; then

@@ -46,9 +46,10 @@ Primary goals:
 # Architecture
 
 The timer starts `server-forensics.service` once per minute. The service invokes
-`scripts/watcher.sh`. The watcher delegates the lightweight sample to
-`scripts/collector.sh --print`, evaluates configured thresholds, appends the
-sample, and exits when the server is healthy.
+`scripts/watcher.sh`. The watcher collects a lightweight sample in-process via
+`collect_metrics_line` (shared with the standalone `scripts/collector.sh`),
+evaluates configured thresholds, appends the sample, and exits when the server is
+healthy.
 
 If a threshold is exceeded, the watcher invokes `scripts/panic.sh`. Panic mode
 creates one incident directory for the outage and keeps adding snapshots to that

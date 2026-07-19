@@ -16,10 +16,11 @@ systemd/timer
   -> current.log
 ```
 
-`scripts/watcher.sh` collects one lightweight line, appends it to
-`current.log`, evaluates thresholds, and exits if the server is healthy. The
-watcher delegates the actual sample creation to `scripts/collector.sh --print`
-so collection remains a separate component.
+`scripts/watcher.sh` collects one lightweight line via `collect_metrics_line`
+(from `lib/metrics.sh`), appends it to `current.log`, evaluates thresholds, and
+exits if the server is healthy. `scripts/collector.sh` shares the same
+collection function and exists as a standalone entrypoint for the
+`server-forensics --collect` CLI command.
 
 ## Panic Path
 

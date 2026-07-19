@@ -11,16 +11,50 @@ read_load_fields() {
 }
 
 read_cpu_busy_pct() {
-    awk '
+    # /proc/stat counters are cumulative since boot, so a single reading only
+    # yields the lifetime average. We persist the previous sample and report the
+    # busy percentage over the delta since the last collection instead. The first
+    # sample after boot (or a cleared state dir) has no baseline and reports NA.
+    local state_file="${STATE_DIR}/cpu_stat"
+    local cpu_now cur_total cur_idle prev_total prev_idle
+
+    cpu_now="$(awk '
         /^cpu / {
             total = 0
             for (i = 2; i <= NF; i++) total += $i
-            idle = $5 + $6
-            if (total > 0) printf "%.1f\n", ((total - idle) / total) * 100
-            else print "0.0"
+            printf "%d %d\n", total, $5 + $6
             exit
         }
-    ' /proc/stat 2>/dev/null || printf '0.0\n'
+    ' /proc/stat 2>/dev/null || true)"
+
+    if [[ -z "$cpu_now" ]]; then
+        printf 'NA\n'
+        return 0
+    fi
+    read -r cur_total cur_idle <<<"$cpu_now"
+
+    if [[ -r "$state_file" ]]; then
+        read -r prev_total prev_idle <"$state_file" 2>/dev/null || true
+    fi
+
+    printf '%s %s\n' "$cur_total" "$cur_idle" >"$state_file" 2>/dev/null || true
+
+    if [[ -z "${prev_total:-}" ]]; then
+        printf 'NA\n'
+        return 0
+    fi
+
+    awk -v ct="$cur_total" -v ci="$cur_idle" -v pt="$prev_total" -v pi="$prev_idle" '
+        BEGIN {
+            dt = ct - pt
+            di = ci - pi
+            if (dt <= 0) { print "NA"; exit }
+            busy = (dt - di) / dt * 100
+            if (busy < 0) busy = 0
+            if (busy > 100) busy = 100
+            printf "%.1f\n", busy
+        }
+    '
 }
 
 read_memory_fields() {
@@ -78,15 +112,18 @@ read_mariadb_running() {
     fi
 }
 
-read_mysql_thread_fields() {
+# Prints five fields: threads_running threads_connected questions uptime
+# slow_queries. All fields are NA when mysqladmin is missing or authentication
+# genuinely fails; a single extended-status call supplies every value.
+read_mysql_status_fields() {
     if ! command_exists mysqladmin; then
-        printf 'NA NA\n'
+        printf 'NA NA NA NA NA\n'
         return 0
     fi
 
     local output
     if ! output="$(run_with_timeout "$COLLECTOR_COMMAND_TIMEOUT" mysqladmin --connect-timeout=1 extended-status 2>/dev/null)"; then
-        printf 'NA NA\n'
+        printf 'NA NA NA NA NA\n'
         return 0
     fi
 
@@ -96,13 +133,16 @@ read_mysql_thread_fields() {
             value = $3
             gsub(/^[ \t]+|[ \t]+$/, "", key)
             gsub(/^[ \t]+|[ \t]+$/, "", value)
-            if (key == "Threads_running") running = value
-            if (key == "Threads_connected") connected = value
+            vals[key] = value
         }
         END {
-            if (running == "") running = "NA"
-            if (connected == "") connected = "NA"
-            print running, connected
+            split("Threads_running Threads_connected Questions Uptime Slow_queries", want, " ")
+            line = ""
+            for (i = 1; i <= 5; i++) {
+                v = (want[i] in vals) ? vals[want[i]] : "NA"
+                line = line (i > 1 ? " " : "") v
+            }
+            print line
         }
     ' <<<"$output"
 }
@@ -145,7 +185,8 @@ collect_metrics_line() {
     local timestamp epoch uptime load1 load5 load15 cpu_busy
     local mem_total mem_available swap_total swap_free
     local apache_workers lsphp_count lsphp_avg_age lsphp_oldest_age
-    local mariadb_running threads_running threads_connected exim_queue
+    local mariadb_running threads_running threads_connected
+    local mysql_questions mysql_uptime mysql_slow_queries exim_queue
     local tcp_established tcp_time_wait tcp_close_wait tcp_syn_recv dstate
 
     timestamp="$(now_iso)"
@@ -157,16 +198,18 @@ collect_metrics_line() {
     apache_workers="$(read_apache_workers)"
     read -r lsphp_count lsphp_avg_age lsphp_oldest_age <<<"$(read_lsphp_fields)"
     mariadb_running="$(read_mariadb_running)"
-    read -r threads_running threads_connected <<<"$(read_mysql_thread_fields)"
+    read -r threads_running threads_connected mysql_questions mysql_uptime mysql_slow_queries \
+        <<<"$(read_mysql_status_fields)"
     exim_queue="$(read_exim_queue)"
     read -r tcp_established tcp_time_wait tcp_close_wait tcp_syn_recv <<<"$(read_tcp_summary)"
     dstate="$(read_dstate_processes)"
 
-    printf 'timestamp=%s epoch=%s uptime_seconds=%s load1=%s load5=%s load15=%s cpu_busy_pct=%s mem_total_mb=%s mem_available_mb=%s swap_total_mb=%s swap_free_mb=%s apache_workers=%s lsphp_count=%s lsphp_avg_age=%s lsphp_oldest_age=%s mariadb_running=%s threads_running=%s threads_connected=%s exim_queue=%s tcp_established=%s tcp_time_wait=%s tcp_close_wait=%s tcp_syn_recv=%s dstate_processes=%s%s\n' \
+    printf 'timestamp=%s epoch=%s uptime_seconds=%s load1=%s load5=%s load15=%s cpu_busy_pct=%s mem_total_mb=%s mem_available_mb=%s swap_total_mb=%s swap_free_mb=%s apache_workers=%s lsphp_count=%s lsphp_avg_age=%s lsphp_oldest_age=%s mariadb_running=%s threads_running=%s threads_connected=%s mysql_questions=%s mysql_uptime_seconds=%s mysql_slow_queries=%s exim_queue=%s tcp_established=%s tcp_time_wait=%s tcp_close_wait=%s tcp_syn_recv=%s dstate_processes=%s%s\n' \
         "$timestamp" "$epoch" "$uptime" "$load1" "$load5" "$load15" "$cpu_busy" \
         "$mem_total" "$mem_available" "$swap_total" "$swap_free" "$apache_workers" \
         "$lsphp_count" "$lsphp_avg_age" "$lsphp_oldest_age" "$mariadb_running" \
-        "$threads_running" "$threads_connected" "$exim_queue" "$tcp_established" \
+        "$threads_running" "$threads_connected" "$mysql_questions" "$mysql_uptime" \
+        "$mysql_slow_queries" "$exim_queue" "$tcp_established" \
         "$tcp_time_wait" "$tcp_close_wait" "$tcp_syn_recv" "$dstate" "$(collect_plugin_metrics)"
 }
 

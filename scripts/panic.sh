@@ -106,7 +106,7 @@ capture_snapshot() {
     run_diag "$file" "top -b -n1" top -b -n1
     run_diag "$file" "ps auxfww" ps auxfww
     run_diag "$file" "ss -antp" ss -antp
-    run_diag "$file" "lsof" lsof
+    run_diag "$file" "lsof -nP" lsof -nP
     run_diag "$file" "df -h" df -h
     run_diag_shell "$file" "dmesg | tail -100" "dmesg | tail -100"
     run_diag "$file" "journalctl --since -5 min" journalctl --since "-5 min" --no-pager
