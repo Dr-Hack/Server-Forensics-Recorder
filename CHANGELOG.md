@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Added
+
+- `--latest`, `--tail [N]`, `--incidents`, and `--last-incident` CLI commands
+  for quickly inspecting samples and analyzing recorded outages.
+
 ### Fixed
 
 - CPU busy percentage is now computed from the delta of `/proc/stat` between

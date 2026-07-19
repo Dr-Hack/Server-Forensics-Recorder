@@ -31,14 +31,18 @@ usage() {
 Usage: server-forensics COMMAND
 
 Commands:
-  --version      Print version information.
-  --health       Print current timer, log, incident, and config status.
-  --health-json  Print current health as JSON.
-  --doctor       Validate config, permissions, dependencies, and systemd state.
-  --test-panic   Create and close a safe test incident without expensive diagnostics.
-  --watch        Run one watcher cycle.
-  --collect      Run one collector cycle.
-  --help         Show this help.
+  --version         Print version information.
+  --health          Print current timer, log, incident, and config status.
+  --health-json     Print current health as JSON.
+  --doctor          Validate config, permissions, dependencies, and systemd state.
+  --latest          Print the newest lightweight sample, one field per line.
+  --tail [N]        Print the last N lightweight samples (default 10).
+  --incidents       List recorded incidents, newest first, with trigger reason.
+  --last-incident   Print the summary of the most recent incident.
+  --test-panic      Create and close a safe test incident without expensive diagnostics.
+  --watch           Run one watcher cycle.
+  --collect         Run one collector cycle.
+  --help            Show this help.
 USAGE
 }
 
@@ -205,6 +209,66 @@ cmd_doctor() {
     printf 'doctor=ok\n'
 }
 
+cmd_latest() {
+    local line
+    line="$(tail -n 1 "$CURRENT_LOG" 2>/dev/null || true)"
+
+    if [[ -z "$line" ]]; then
+        printf 'no samples recorded yet at %s\n' "$CURRENT_LOG" >&2
+        return 1
+    fi
+
+    printf '%s\n' "$line" | tr ' ' '\n'
+}
+
+cmd_tail() {
+    local count="${1:-10}"
+
+    if ! is_uint "$count"; then
+        printf 'tail count must be a non-negative integer: %s\n' "$count" >&2
+        return 2
+    fi
+
+    if [[ ! -r "$CURRENT_LOG" ]]; then
+        printf 'no current log at %s\n' "$CURRENT_LOG" >&2
+        return 1
+    fi
+
+    tail -n "$count" "$CURRENT_LOG"
+}
+
+cmd_incidents() {
+    local dir found=0
+
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        found=1
+        printf '%-28s reason=%s\n' "$(basename "$dir")" "$(incident_meta_get "$dir" reason unknown)"
+    done < <(find "$INCIDENT_DIR" -mindepth 1 -maxdepth 1 -type d -name 'incident-*' 2>/dev/null | sort -r)
+
+    if [[ "$found" -eq 0 ]]; then
+        printf 'no incidents recorded\n'
+    fi
+}
+
+cmd_last_incident() {
+    local dir
+    dir="$(latest_incident)"
+
+    if [[ -z "$dir" ]]; then
+        printf 'no incidents recorded\n'
+        return 0
+    fi
+
+    printf 'incident-dir=%s\n\n' "$dir"
+
+    if [[ -r "${dir}/summary.txt" ]]; then
+        cat "${dir}/summary.txt"
+    else
+        printf 'summary.txt not found (incident may still be active)\n'
+    fi
+}
+
 cmd_test_panic() {
     "${ROOT_DIR}/scripts/panic.sh" --test-panic
 }
@@ -222,6 +286,18 @@ main() {
             ;;
         --doctor)
             cmd_doctor
+            ;;
+        --latest)
+            cmd_latest
+            ;;
+        --tail)
+            cmd_tail "${2:-10}"
+            ;;
+        --incidents)
+            cmd_incidents
+            ;;
+        --last-incident)
+            cmd_last_incident
             ;;
         --test-panic)
             cmd_test_panic

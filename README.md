@@ -96,6 +96,44 @@ Logs and incidents are written to:
 /var/log/server-forensics/
 ```
 
+## Commands
+
+The installed CLI is `server-forensics` (symlinked into `/usr/local/sbin` and
+`/usr/bin`). Commands that read or write `/var/log/server-forensics` need root,
+so run them with `sudo`.
+
+| Command | What it does |
+| --- | --- |
+| `server-forensics --version` | Version, install directory, and active config path. |
+| `server-forensics --health` | Timer/service state, last run, active + last incident, and thresholds. |
+| `server-forensics --health-json` | The same health data as JSON (pipe to `jq`). |
+| `server-forensics --doctor` | Validate config, writable dirs, dependencies, and systemd state. |
+| `server-forensics --latest` | Print the newest lightweight sample, one field per line. |
+| `server-forensics --tail [N]` | Print the last `N` samples from `current.log` (default 10). |
+| `server-forensics --incidents` | List recorded incidents, newest first, with their trigger reason. |
+| `server-forensics --last-incident` | Print the summary of the most recent incident. |
+| `server-forensics --test-panic` | Create and close a safe incident with no expensive diagnostics. |
+| `server-forensics --collect` | Take one lightweight sample now and append it to `current.log`. |
+| `server-forensics --watch` | Run one full watcher cycle (collect, evaluate thresholds, panic if tripped). |
+| `server-forensics --help` | Show usage. |
+
+Common workflows:
+
+```bash
+# Is it running and healthy right now?
+sudo server-forensics --doctor && server-forensics --health
+
+# What do the live numbers look like?
+server-forensics --latest
+server-forensics --tail 20
+
+# Analyze the most recent outage
+server-forensics --incidents
+server-forensics --last-incident
+# then drill into the captured diagnostics:
+less /var/log/server-forensics/incidents/incident-*/snapshot-1.log
+```
+
 ## How It Works
 
 Normal path:
@@ -103,8 +141,7 @@ Normal path:
 ```text
 systemd timer
   -> watcher
-  -> collector --print
-  -> lightweight metrics
+  -> collect lightweight metrics
   -> current.log
   -> exit if healthy
 ```
