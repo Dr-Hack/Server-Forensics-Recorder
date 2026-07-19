@@ -23,6 +23,11 @@ main() {
         base="$(basename "$old_dir")"
         archive="${ARCHIVE_DIR}/${base}.tar.gz"
 
+        if ! path_is_under "$old_dir" "$INCIDENT_DIR"; then
+            log_error "refusing to rotate path outside incident directory: ${old_dir}"
+            continue
+        fi
+
         if command_exists tar; then
             tar -C "$INCIDENT_DIR" -czf "$archive" "$base"
             log_info "archived old incident: ${archive}"

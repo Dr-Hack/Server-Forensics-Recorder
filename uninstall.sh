@@ -5,6 +5,9 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/server-forensics}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/server-forensics}"
 LOG_DIR="${LOG_DIR:-/var/log/server-forensics}"
 DELETE_LOGS=0
+INSTALL_MARKER=".server-forensics-install"
+CONFIG_MARKER=".server-forensics-config"
+LOG_MARKER=".server-forensics-logs"
 
 usage() {
     printf 'Usage: %s [--delete-logs]\n' "$0"
@@ -45,12 +48,57 @@ stop_systemd() {
     fi
 }
 
+canonical_path() {
+    if command -v realpath >/dev/null 2>&1; then
+        realpath -m -- "$1"
+    elif command -v readlink >/dev/null 2>&1; then
+        readlink -f -- "$1"
+    else
+        printf 'realpath or readlink is required for safe uninstall.\n' >&2
+        exit 1
+    fi
+}
+
+refuse_unsafe_path() {
+    local path="$1"
+    local resolved
+    resolved="$(canonical_path "$path")"
+
+    case "$resolved" in
+        "" | "/" | "/bin" | "/boot" | "/dev" | "/etc" | "/home" | "/lib" | "/lib64" | "/opt" | "/proc" | "/root" | "/run" | "/sbin" | "/sys" | "/tmp" | "/usr" | "/var" | "/var/log")
+            printf 'Refusing unsafe uninstall path: %s\n' "$resolved" >&2
+            exit 1
+            ;;
+    esac
+
+    printf '%s\n' "$resolved"
+}
+
+remove_marked_tree() {
+    local path="$1"
+    local marker="$2"
+    local resolved
+    resolved="$(refuse_unsafe_path "$path")"
+
+    if [[ ! -e "$resolved" ]]; then
+        return 0
+    fi
+
+    if [[ ! -f "$resolved/$marker" ]]; then
+        printf 'Refusing to remove unmarked directory: %s\n' "$resolved" >&2
+        printf 'Expected marker: %s\n' "$resolved/$marker" >&2
+        exit 1
+    fi
+
+    rm -rf -- "$resolved"
+}
+
 remove_files() {
-    rm -rf -- "$INSTALL_DIR"
-    rm -rf -- "$CONFIG_DIR"
+    remove_marked_tree "$INSTALL_DIR" "$INSTALL_MARKER"
+    remove_marked_tree "$CONFIG_DIR" "$CONFIG_MARKER"
 
     if [[ "$DELETE_LOGS" -eq 1 ]]; then
-        rm -rf -- "$LOG_DIR"
+        remove_marked_tree "$LOG_DIR" "$LOG_MARKER"
     fi
 }
 

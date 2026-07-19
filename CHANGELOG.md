@@ -11,3 +11,4 @@ All notable changes to this project will be documented in this file.
 - Added systemd timer/service installation.
 - Added GitHub-ready repository layout with docs and syntax test.
 - Added ShellCheck, shfmt, Bash syntax, installer syntax, and systemd unit checks through GitHub Actions.
+- Added safer uninstall markers and panic snapshot output caps for production deployment.

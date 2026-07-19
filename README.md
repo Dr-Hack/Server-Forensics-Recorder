@@ -202,6 +202,7 @@ Panic controls:
 ```bash
 PANIC_SNAPSHOT_INTERVAL=10
 PANIC_COMMAND_TIMEOUT=20
+PANIC_OUTPUT_LINES=5000
 ```
 
 Tune thresholds from real `current.log` values on your server. Start

@@ -7,6 +7,9 @@ CONFIG_DIR="${CONFIG_DIR:-/etc/server-forensics}"
 CONFIG_FILE="${CONFIG_FILE:-${CONFIG_DIR}/config.conf}"
 LOG_DIR_DEFAULT="/var/log/server-forensics"
 INSTALLED_LOG_DIR="$LOG_DIR_DEFAULT"
+INSTALL_MARKER=".server-forensics-install"
+CONFIG_MARKER=".server-forensics-config"
+LOG_MARKER=".server-forensics-logs"
 
 require_root() {
     if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
@@ -27,6 +30,7 @@ copy_project() {
     cp "$PROJECT_DIR"/LICENSE "$INSTALL_DIR"/
     chmod 0755 "$INSTALL_DIR"/scripts/collector.sh "$INSTALL_DIR"/scripts/watcher.sh "$INSTALL_DIR"/scripts/panic.sh "$INSTALL_DIR"/scripts/rotate.sh
     chmod 0644 "$INSTALL_DIR"/config.conf "$INSTALL_DIR"/lib/*.sh
+    printf 'server-forensics install directory\n' >"$INSTALL_DIR/$INSTALL_MARKER"
 }
 
 install_config() {
@@ -35,6 +39,7 @@ install_config() {
         cp "$PROJECT_DIR/config.conf" "$CONFIG_FILE"
         chmod 0644 "$CONFIG_FILE"
     fi
+    printf 'server-forensics config directory\n' >"$CONFIG_DIR/$CONFIG_MARKER"
 }
 
 install_logs() {
@@ -50,6 +55,7 @@ install_logs() {
 
     mkdir -p "$configured_log_dir/incidents" "$configured_log_dir/archive" "$configured_log_dir/.state"
     touch "$configured_log_dir/current.log" "$configured_log_dir/server-forensics.log"
+    printf 'server-forensics log directory\n' >"$configured_log_dir/$LOG_MARKER"
 }
 
 install_systemd() {

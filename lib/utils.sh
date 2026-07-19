@@ -65,6 +65,7 @@ load_config() {
     QUIET="${QUIET:-0}"
     PANIC_SNAPSHOT_INTERVAL="${PANIC_SNAPSHOT_INTERVAL:-10}"
     PANIC_COMMAND_TIMEOUT="${PANIC_COMMAND_TIMEOUT:-20}"
+    PANIC_OUTPUT_LINES="${PANIC_OUTPUT_LINES:-5000}"
 
     local bundled_config="${SF_ROOT}/config.conf"
     local system_config="/etc/server-forensics/config.conf"
@@ -133,6 +134,27 @@ run_with_timeout() {
     else
         "$@"
     fi
+}
+
+canonical_path() {
+    if command_exists realpath; then
+        realpath -m -- "$1"
+    elif command_exists readlink; then
+        readlink -f -- "$1"
+    else
+        return 1
+    fi
+}
+
+path_is_under() {
+    local child="$1"
+    local parent="$2"
+    local child_real parent_real
+
+    child_real="$(canonical_path "$child")"
+    parent_real="$(canonical_path "$parent")"
+
+    [[ "$child_real" == "$parent_real"/* ]]
 }
 
 write_file_atomic() {

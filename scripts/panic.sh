@@ -38,14 +38,17 @@ run_diag() {
 
     set +e
     if command_exists timeout; then
-        timeout "$PANIC_COMMAND_TIMEOUT" "$@" >>"$file" 2>&1
+        timeout "$PANIC_COMMAND_TIMEOUT" "$@" 2>&1 | head -n "$PANIC_OUTPUT_LINES" >>"$file"
+        rc=${PIPESTATUS[0]}
     else
-        "$@" >>"$file" 2>&1
+        "$@" 2>&1 | head -n "$PANIC_OUTPUT_LINES" >>"$file"
+        rc=${PIPESTATUS[0]}
     fi
-    rc=$?
     set -e
 
-    if [[ "$rc" -ne 0 ]]; then
+    if [[ "$rc" -eq 141 ]]; then
+        printf '\n[output capped at %s lines]\n' "$PANIC_OUTPUT_LINES" >>"$file"
+    elif [[ "$rc" -ne 0 ]]; then
         printf '\n[command exited with status %s]\n' "$rc" >>"$file"
     fi
 }
@@ -65,14 +68,17 @@ run_diag_shell() {
 
     set +e
     if command_exists timeout; then
-        timeout "$PANIC_COMMAND_TIMEOUT" bash -o pipefail -c "$shell_command" >>"$file" 2>&1
+        timeout "$PANIC_COMMAND_TIMEOUT" bash -o pipefail -c "$shell_command" 2>&1 | head -n "$PANIC_OUTPUT_LINES" >>"$file"
+        rc=${PIPESTATUS[0]}
     else
-        bash -o pipefail -c "$shell_command" >>"$file" 2>&1
+        bash -o pipefail -c "$shell_command" 2>&1 | head -n "$PANIC_OUTPUT_LINES" >>"$file"
+        rc=${PIPESTATUS[0]}
     fi
-    rc=$?
     set -e
 
-    if [[ "$rc" -ne 0 ]]; then
+    if [[ "$rc" -eq 141 ]]; then
+        printf '\n[output capped at %s lines]\n' "$PANIC_OUTPUT_LINES" >>"$file"
+    elif [[ "$rc" -ne 0 ]]; then
         printf '\n[command exited with status %s]\n' "$rc" >>"$file"
     fi
 }

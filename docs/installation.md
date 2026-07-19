@@ -82,3 +82,12 @@ Delete logs:
 ```bash
 sudo bash uninstall.sh --delete-logs
 ```
+
+The uninstaller removes only directories created and marked by the installer:
+
+- `/opt/server-forensics`
+- `/etc/server-forensics`
+- `/var/log/server-forensics` when `--delete-logs` is used
+
+If a directory is missing, uninstall skips it. If a directory exists but does
+not contain the expected project marker file, uninstall refuses to delete it.
