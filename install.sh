@@ -7,6 +7,7 @@ CONFIG_DIR="${CONFIG_DIR:-/etc/server-forensics}"
 CONFIG_FILE="${CONFIG_FILE:-${CONFIG_DIR}/config.conf}"
 LOG_DIR_DEFAULT="/var/log/server-forensics"
 BIN_DIR="${BIN_DIR:-/usr/local/sbin}"
+SUDO_BIN_DIR="${SUDO_BIN_DIR:-/usr/bin}"
 INSTALLED_LOG_DIR="$LOG_DIR_DEFAULT"
 INSTALL_MARKER=".server-forensics-install"
 CONFIG_MARKER=".server-forensics-config"
@@ -88,6 +89,10 @@ install_systemd() {
 install_cli() {
     mkdir -p "$BIN_DIR"
     ln -sfn "$INSTALL_DIR/bin/server-forensics" "$BIN_DIR/server-forensics"
+
+    if [[ -d "$SUDO_BIN_DIR" && "$SUDO_BIN_DIR" != "$BIN_DIR" ]]; then
+        ln -sfn "$INSTALL_DIR/bin/server-forensics" "$SUDO_BIN_DIR/server-forensics"
+    fi
 }
 
 verify_installation() {

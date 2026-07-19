@@ -5,6 +5,7 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/server-forensics}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/server-forensics}"
 LOG_DIR="${LOG_DIR:-/var/log/server-forensics}"
 BIN_DIR="${BIN_DIR:-/usr/local/sbin}"
+SUDO_BIN_DIR="${SUDO_BIN_DIR:-/usr/bin}"
 DELETE_LOGS=0
 INSTALL_MARKER=".server-forensics-install"
 CONFIG_MARKER=".server-forensics-config"
@@ -96,6 +97,9 @@ remove_marked_tree() {
 
 remove_files() {
     rm -f -- "$BIN_DIR/server-forensics"
+    if [[ "$SUDO_BIN_DIR" != "$BIN_DIR" ]]; then
+        rm -f -- "$SUDO_BIN_DIR/server-forensics"
+    fi
     remove_marked_tree "$INSTALL_DIR" "$INSTALL_MARKER"
     remove_marked_tree "$CONFIG_DIR" "$CONFIG_MARKER"
 
