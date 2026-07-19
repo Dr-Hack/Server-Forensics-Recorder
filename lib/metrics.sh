@@ -112,6 +112,18 @@ read_mariadb_running() {
     fi
 }
 
+# Emits the base mysqladmin invocation, one token per line, honoring an optional
+# MYSQL_DEFAULTS_FILE. cPanel keeps root's credentials in /root/.my.cnf, which
+# the client only reads when $HOME points at root's home; passing the defaults
+# file (or the systemd unit exporting HOME=/root) makes authentication reliable
+# outside an interactive shell. Consume with `mapfile -t base < <(...)`.
+mysqladmin_base_args() {
+    printf '%s\n' mysqladmin
+    if [[ -n "${MYSQL_DEFAULTS_FILE:-}" ]]; then
+        printf '%s\n' "--defaults-extra-file=${MYSQL_DEFAULTS_FILE}"
+    fi
+}
+
 # Prints five fields: threads_running threads_connected questions uptime
 # slow_queries. All fields are NA when mysqladmin is missing or authentication
 # genuinely fails; a single extended-status call supplies every value.
@@ -122,7 +134,9 @@ read_mysql_status_fields() {
     fi
 
     local output
-    if ! output="$(run_with_timeout "$COLLECTOR_COMMAND_TIMEOUT" mysqladmin --connect-timeout=1 extended-status 2>/dev/null)"; then
+    local -a base
+    mapfile -t base < <(mysqladmin_base_args)
+    if ! output="$(run_with_timeout "$COLLECTOR_COMMAND_TIMEOUT" "${base[@]}" --connect-timeout=1 extended-status 2>/dev/null)"; then
         printf 'NA NA NA NA NA\n'
         return 0
     fi

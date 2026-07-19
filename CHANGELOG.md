@@ -8,6 +8,14 @@ All notable changes to this project will be documented in this file.
 
 - `--latest`, `--tail [N]`, `--incidents`, and `--last-incident` CLI commands
   for quickly inspecting samples and analyzing recorded outages.
+- Optional `MYSQL_DEFAULTS_FILE` config to point `mysqladmin` at a specific
+  credentials file for status collection and panic diagnostics.
+
+### Fixed (deployment)
+
+- The systemd unit now exports `HOME=/root` so the MySQL/MariaDB client finds
+  root's `~/.my.cnf` (where cPanel stores DB credentials) under systemd, which
+  previously left the MariaDB metrics as `NA` even though the server was up.
 
 ### Fixed
 

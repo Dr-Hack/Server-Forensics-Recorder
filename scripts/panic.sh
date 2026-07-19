@@ -110,8 +110,11 @@ capture_snapshot() {
     run_diag "$file" "df -h" df -h
     run_diag_shell "$file" "dmesg | tail -100" "dmesg | tail -100"
     run_diag "$file" "journalctl --since -5 min" journalctl --since "-5 min" --no-pager
-    run_diag "$file" "mysqladmin processlist" mysqladmin --connect-timeout=2 processlist
-    run_diag "$file" "mysqladmin status" mysqladmin --connect-timeout=2 status
+
+    local -a mysqladmin_base
+    mapfile -t mysqladmin_base < <(mysqladmin_base_args)
+    run_diag "$file" "mysqladmin processlist" "${mysqladmin_base[@]}" --connect-timeout=2 processlist
+    run_diag "$file" "mysqladmin status" "${mysqladmin_base[@]}" --connect-timeout=2 status
     run_diag "$file" "apachectl status" apachectl status
 
     incident_increment_snapshots "$dir" >/dev/null

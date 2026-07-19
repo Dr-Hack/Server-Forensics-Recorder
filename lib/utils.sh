@@ -73,6 +73,7 @@ load_config() {
     VERBOSE="${VERBOSE:-1}"
     QUIET="${QUIET:-0}"
     COLLECTOR_COMMAND_TIMEOUT="${COLLECTOR_COMMAND_TIMEOUT:-1}"
+    MYSQL_DEFAULTS_FILE="${MYSQL_DEFAULTS_FILE:-}"
     PANIC_SNAPSHOT_INTERVAL="${PANIC_SNAPSHOT_INTERVAL:-10}"
     PANIC_COMMAND_TIMEOUT="${PANIC_COMMAND_TIMEOUT:-20}"
     PANIC_OUTPUT_LINES="${PANIC_OUTPUT_LINES:-5000}"
@@ -158,6 +159,10 @@ validate_config() {
     [[ "$PANIC_OUTPUT_LINES" -ge 100 ]] || fail_config "PANIC_OUTPUT_LINES must be at least 100"
 
     validate_path_value LOG_DIR "$LOG_DIR"
+
+    if [[ -n "${MYSQL_DEFAULTS_FILE:-}" ]]; then
+        [[ "$MYSQL_DEFAULTS_FILE" == /* ]] || fail_config "MYSQL_DEFAULTS_FILE must be absolute: $MYSQL_DEFAULTS_FILE"
+    fi
 
     while IFS= read -r plugin_dir; do
         [[ -n "$plugin_dir" ]] || continue

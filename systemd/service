@@ -7,6 +7,10 @@ After=network-online.target
 [Service]
 Type=oneshot
 Environment=SF_CONFIG=/etc/server-forensics/config.conf
+# systemd does not export HOME for system services, so the MySQL client cannot
+# find root's ~/.my.cnf (cPanel stores DB credentials there). Point it at root's
+# home so mysqladmin authenticates the same way it does in an interactive shell.
+Environment=HOME=/root
 ExecStart=/opt/server-forensics/scripts/watcher.sh
 Nice=10
 IOSchedulingClass=best-effort

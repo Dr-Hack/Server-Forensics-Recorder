@@ -51,10 +51,17 @@ PANIC_OUTPUT_LINES=5000
 
 ```bash
 COLLECTOR_COMMAND_TIMEOUT=1
+MYSQL_DEFAULTS_FILE=
 ```
 
-This caps optional collector commands such as `mysqladmin` and `exim`. Keep this
-low so normal collection stays lightweight.
+- `COLLECTOR_COMMAND_TIMEOUT`: Caps optional collector commands such as
+  `mysqladmin` and `exim`. Keep this low so normal collection stays lightweight.
+- `MYSQL_DEFAULTS_FILE`: Optional absolute path to a MySQL/MariaDB credentials
+  file, passed to `mysqladmin` as `--defaults-extra-file`. Leave empty to rely on
+  the client's normal lookup. On cPanel, root's credentials live in
+  `/root/.my.cnf`; the systemd unit exports `HOME=/root` so that file is found
+  automatically, so this is only needed for non-standard credential locations
+  (for example, a dedicated read-only monitoring account).
 
 ## Plugins
 
