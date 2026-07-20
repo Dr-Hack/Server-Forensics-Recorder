@@ -43,6 +43,33 @@ These were on the original wishlist and are implemented:
 - **MariaDB metrics** — now `Threads_running`, `Threads_connected`, `Questions`,
   `Uptime`, `Slow_queries` from one `extended-status` call.
 
+## Investigation engine (implemented)
+
+The recorder no longer just counts D-state processes — it explains them. This
+was the highest-priority work after several real incidents were traced to high
+D-state counts with low CPU.
+
+- **D-state forensics** — each panic snapshot writes `dstate-N.log`: full
+  `ps … wchan:40 …`, the D-state processes alone, per-PID `/proc/<pid>/stack`
+  and `wchan` (capped by `PANIC_DSTATE_MAX_PIDS`), `pstree -ap`, scheduled jobs
+  (`systemctl list-timers`, `crontab -l`, `/etc/cron.*`), and detected
+  maintenance/package/backup processes. Package managers are **detected, never
+  invoked** — running `dnf`/`yum`/`rpm` during a stall could make the recorder
+  part of the outage.
+- **IO wait** — `iowait_pct` added to the lightweight sample from the existing
+  `/proc/stat` delta (no `vmstat`/`iostat` spawn); incidents track `peak_iowait`
+  and `peak_dstate`.
+- **`analysis.txt`** — `lib/analysis.sh` correlates the evidence at incident
+  close into a likely subsystem + confidence + evidence + next steps, folds a
+  one-line verdict into `summary.txt`, and is viewable via `--last-analysis`.
+  The classifier is a transparent weighted-evidence model (wchan → subsystem,
+  corroborated by blocked executable, running maintenance, IO wait, and
+  low-CPU-vs-high-load), so the confidence figure is explainable.
+
+Tuning note: the wchan/comm → subsystem maps in `lib/analysis.sh` are seeded
+from general Linux knowledge. Feed real `dstate-*.log` output from a production
+incident back in to sharpen them for this server's actual wait channels.
+
 ---
 
 ## Remaining ideas (not yet implemented)

@@ -77,6 +77,9 @@ load_config() {
     PANIC_SNAPSHOT_INTERVAL="${PANIC_SNAPSHOT_INTERVAL:-10}"
     PANIC_COMMAND_TIMEOUT="${PANIC_COMMAND_TIMEOUT:-20}"
     PANIC_OUTPUT_LINES="${PANIC_OUTPUT_LINES:-5000}"
+    ENABLE_DSTATE_FORENSICS="${ENABLE_DSTATE_FORENSICS:-1}"
+    PANIC_CAPTURE_KERNEL_STACK="${PANIC_CAPTURE_KERNEL_STACK:-1}"
+    PANIC_DSTATE_MAX_PIDS="${PANIC_DSTATE_MAX_PIDS:-25}"
     ENABLE_PLUGINS="${ENABLE_PLUGINS:-1}"
     PLUGIN_TIMEOUT="${PLUGIN_TIMEOUT:-1}"
     PLUGIN_DIRS="${PLUGIN_DIRS:-${SF_ROOT}/plugins/metrics:/etc/server-forensics/plugins/metrics}"
@@ -158,6 +161,11 @@ validate_config() {
     is_uint "$PANIC_OUTPUT_LINES" || fail_config "PANIC_OUTPUT_LINES must be a non-negative integer"
     [[ "$PANIC_OUTPUT_LINES" -ge 100 ]] || fail_config "PANIC_OUTPUT_LINES must be at least 100"
 
+    sf_is_bool_value "$ENABLE_DSTATE_FORENSICS" || fail_config "ENABLE_DSTATE_FORENSICS must be a boolean value"
+    sf_is_bool_value "$PANIC_CAPTURE_KERNEL_STACK" || fail_config "PANIC_CAPTURE_KERNEL_STACK must be a boolean value"
+    is_uint "$PANIC_DSTATE_MAX_PIDS" || fail_config "PANIC_DSTATE_MAX_PIDS must be a non-negative integer"
+    [[ "$PANIC_DSTATE_MAX_PIDS" -ge 1 ]] || fail_config "PANIC_DSTATE_MAX_PIDS must be at least 1"
+
     validate_path_value LOG_DIR "$LOG_DIR"
 
     if [[ -n "${MYSQL_DEFAULTS_FILE:-}" ]]; then
@@ -193,20 +201,25 @@ metric_value() {
     ' <<<"$line"
 }
 
+# The numeric helpers force operands through `+0` so a non-numeric value such as
+# the `NA` sentinel (emitted when a metric has no baseline yet) collapses to 0
+# instead of triggering awk's lexical string comparison — where, for example,
+# "NA" > "20" is true. Without this, a missing IO-wait reading would look like
+# high storage wait, and num_max could let NA overwrite a real peak.
 num_gt() {
-    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { exit !(a > b) }'
+    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { exit !((a + 0) > (b + 0)) }'
 }
 
 num_lt() {
-    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { exit !(a < b) }'
+    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { exit !((a + 0) < (b + 0)) }'
 }
 
 num_max() {
-    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { if (a > b) print a; else print b }'
+    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { if ((a + 0) > (b + 0)) print a; else print b }'
 }
 
 num_min() {
-    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { if (a < b) print a; else print b }'
+    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN { if ((a + 0) < (b + 0)) print a; else print b }'
 }
 
 run_with_timeout() {

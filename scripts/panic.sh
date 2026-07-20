@@ -14,6 +14,8 @@ source "${ROOT_DIR}/lib/plugins.sh"
 source "${ROOT_DIR}/lib/metrics.sh"
 # shellcheck source=../lib/incident.sh
 source "${ROOT_DIR}/lib/incident.sh"
+# shellcheck source=../lib/analysis.sh
+source "${ROOT_DIR}/lib/analysis.sh"
 
 append_header() {
     local file="$1"
@@ -85,6 +87,87 @@ run_diag_shell() {
     fi
 }
 
+# Reads kernel stacks and wchan for the D-state processes that are the whole
+# point of this investigation. Runs entirely from /proc — no disk I/O to the
+# (possibly stalled) filesystem — and is bounded by PANIC_DSTATE_MAX_PIDS so a
+# storm of blocked tasks can never make the recorder fan out. Skips gracefully
+# when the kernel or permissions withhold the stack (needs root; some hardened
+# kernels restrict /proc/<pid>/stack entirely).
+capture_dstate_kernel_stacks() {
+    local file="$1"
+    local max="${PANIC_DSTATE_MAX_PIDS:-25}"
+    local -a pids=()
+    local pid comm
+
+    append_header "$file" "kernel stacks (D-state, capped ${max})"
+
+    mapfile -t pids < <(ps -eo pid=,stat= 2>/dev/null | awk '$2 ~ /^D/ { print $1 }' | head -n "$max")
+
+    if [[ "${#pids[@]}" -eq 0 ]]; then
+        printf 'no D-state processes present at capture time\n' >>"$file"
+        return 0
+    fi
+
+    for pid in "${pids[@]}"; do
+        comm="$(cat "/proc/${pid}/comm" 2>/dev/null || printf '?')"
+        {
+            printf '\n--- pid %s (%s) ---\n' "$pid" "$comm"
+            printf 'wchan: '
+            cat "/proc/${pid}/wchan" 2>/dev/null || printf '[unavailable]'
+            printf '\nstack:\n'
+            if [[ -r "/proc/${pid}/stack" ]]; then
+                cat "/proc/${pid}/stack" 2>/dev/null || printf '[stack unreadable]\n'
+            else
+                printf '[stack unavailable — needs root / permitted kernel]\n'
+            fi
+        } >>"$file"
+    done
+}
+
+# Captures the D-state / blocking picture into its own file so the analysis
+# engine (and a human) can parse it without wading through the general snapshot.
+# Everything here is a cheap /proc or metadata read; package managers are
+# DETECTED from the process table, never invoked — running dnf/yum/rpm during a
+# panic can block on locks or the network and make the recorder part of the
+# outage.
+capture_forensics() {
+    local dir="$1"
+    local index="$2"
+    local file="${dir}/dstate-${index}.log"
+
+    {
+        printf 'Server Forensics D-state / Blocking Snapshot\n'
+        printf 'snapshot=%s\n' "$index"
+        printf 'created_at=%s\n' "$(now_iso)"
+    } >"$file"
+
+    # Full process table with wait channels, then the D-state processes alone —
+    # the single most valuable signal for "high load, low CPU".
+    run_diag "$file" "ps wchan (all)" ps -eo pid,user,state,wchan:40,comm,args
+    run_diag_shell "$file" "ps wchan (D-state only)" \
+        "ps -eo pid,user,state,wchan:40,comm,args | awk 'NR==1 || \$3 ~ /^D/'"
+
+    if sf_bool "${PANIC_CAPTURE_KERNEL_STACK:-1}"; then
+        capture_dstate_kernel_stacks "$file"
+    fi
+
+    # Which service spawned the blocked processes.
+    run_diag "$file" "pstree -ap" pstree -ap
+
+    # Scheduled jobs running during the incident.
+    run_diag "$file" "systemctl list-timers" systemctl list-timers --all --no-pager
+    run_diag_shell "$file" "crontab -l (root)" "crontab -l"
+    run_diag_shell "$file" "/etc/crontab and /etc/cron.*" \
+        "cat /etc/crontab 2>/dev/null; for d in /etc/cron.d /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly; do printf '\n== %s ==\n' \"\$d\"; ls -la \"\$d\" 2>/dev/null; done"
+
+    # Maintenance / package / backup activity, detected from the process table.
+    run_diag_shell "$file" "maintenance/package processes (detected)" \
+        "ps -eo pid,ppid,user,stat,etimes,comm,args | awk 'NR==1 || (tolower(\$0) ~ /dnf|yum| rpm|packagekit|imunify|cagefs|clamscan|freshclam|updatedb|mlocate|pkgacct|cpbackup|jetbackup|backup|rsync| tar |mysqldump|xtrabackup|mariabackup|upcp|leapp|ea-nginx|quota/ && \$6 !~ /^(awk|ps|sh|bash)\$/)'"
+
+    incident_meta_set "$dir" last_dstate_log "$file"
+    log_warn "captured d-state forensics ${index}: ${file}"
+}
+
 capture_snapshot() {
     local dir="$1"
     local index="$2"
@@ -116,6 +199,10 @@ capture_snapshot() {
     run_diag "$file" "mysqladmin processlist" "${mysqladmin_base[@]}" --connect-timeout=2 processlist
     run_diag "$file" "mysqladmin status" "${mysqladmin_base[@]}" --connect-timeout=2 status
     run_diag "$file" "apachectl status" apachectl status
+
+    if sf_bool "${ENABLE_DSTATE_FORENSICS:-1}"; then
+        capture_forensics "$dir" "$index"
+    fi
 
     incident_increment_snapshots "$dir" >/dev/null
     log_warn "captured panic snapshot ${index}: ${file}"
@@ -187,6 +274,7 @@ main() {
 
         if metrics_are_healthy "$metric_line"; then
             incident_close "$dir" "$metric_line"
+            analysis_generate "$dir" "$metric_line" || log_warn "analysis generation failed"
             log_warn "panic mode recovered and incident closed: ${dir}"
             "${SCRIPT_DIR}/rotate.sh" >/dev/null 2>&1 || log_warn "rotation failed"
             return 0

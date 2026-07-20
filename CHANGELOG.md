@@ -6,8 +6,26 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- `--latest`, `--tail [N]`, `--incidents`, and `--last-incident` CLI commands
-  for quickly inspecting samples and analyzing recorded outages.
+- **D-state / blocking forensics.** Each panic snapshot now writes a
+  `dstate-N.log` recording `ps -eo pid,user,state,wchan:40,comm,args`, the
+  D-state processes alone, per-PID `/proc/<pid>/stack` and `wchan` (capped by
+  `PANIC_DSTATE_MAX_PIDS`), `pstree -ap`, scheduled jobs (`systemctl
+  list-timers`, `crontab -l`, `/etc/cron.*`), and any maintenance/package/backup
+  processes **detected** from the process table. Package managers are never
+  invoked. Gated by `ENABLE_DSTATE_FORENSICS` / `PANIC_CAPTURE_KERNEL_STACK`.
+- **Investigation engine (`lib/analysis.sh`).** On incident close the recorder
+  now generates `analysis.txt`: the most likely responsible subsystem
+  (Filesystem / Disk / MariaDB / Apache / PHP / Backup / Package manager /
+  Maintenance / Memory / Network / Kernel / Unknown), an explainable confidence
+  level, the supporting evidence (most common wait channel and blocked
+  executable, peak D-state, peak IO wait, low-CPU-vs-high-load), and recommended
+  next investigation steps. A one-line verdict is folded into `summary.txt`.
+- `iowait_pct` in the lightweight sample, derived from the same `/proc/stat`
+  delta already used for CPU (no extra process spawned). Incidents now track
+  `peak_dstate` and `peak_iowait`.
+- `--latest`, `--tail [N]`, `--incidents`, `--last-incident`, and
+  `--last-analysis` CLI commands for quickly inspecting samples, recorded
+  outages, and the auto-generated root-cause analysis.
 - Optional `MYSQL_DEFAULTS_FILE` config to point `mysqladmin` at a specific
   credentials file for status collection and panic diagnostics.
 

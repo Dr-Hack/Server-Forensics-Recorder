@@ -25,6 +25,8 @@ source "${ROOT_DIR}/lib/plugins.sh"
 source "${ROOT_DIR}/lib/metrics.sh"
 # shellcheck source=../lib/incident.sh
 source "${ROOT_DIR}/lib/incident.sh"
+# shellcheck source=../lib/analysis.sh
+source "${ROOT_DIR}/lib/analysis.sh"
 
 usage() {
     cat <<'USAGE'
@@ -39,6 +41,7 @@ Commands:
   --tail [N]        Print the last N lightweight samples (default 10).
   --incidents       List recorded incidents, newest first, with trigger reason.
   --last-incident   Print the summary of the most recent incident.
+  --last-analysis   Print the auto-generated root-cause analysis of the latest incident.
   --test-panic      Create and close a safe test incident without expensive diagnostics.
   --watch           Run one watcher cycle.
   --collect         Run one collector cycle.
@@ -180,6 +183,8 @@ cmd_doctor() {
     check_command bash
     check_command awk
     check_command ps
+    check_command pstree
+    check_command crontab
     check_command find
     check_command sort
     check_command head
@@ -269,6 +274,36 @@ cmd_last_incident() {
     fi
 }
 
+cmd_last_analysis() {
+    local dir
+    dir="$(latest_incident)"
+
+    if [[ -z "$dir" ]]; then
+        printf 'no incidents recorded\n'
+        return 0
+    fi
+
+    printf 'incident-dir=%s\n\n' "$dir"
+
+    if [[ -r "${dir}/analysis.txt" ]]; then
+        cat "${dir}/analysis.txt"
+        return 0
+    fi
+
+    # No analysis on disk (e.g. an incident that is still active, or one closed
+    # before this feature existed). Generate a best-effort view on demand.
+    if incident_active_dir >/dev/null 2>&1 && [[ "$(incident_active_dir 2>/dev/null)" == "$dir" ]]; then
+        printf 'analysis.txt not found (incident still active); showing interim analysis:\n\n'
+    else
+        printf 'analysis.txt not found; generating from captured evidence:\n\n'
+    fi
+
+    local final_line
+    final_line="$(grep -m1 'cpu_busy_pct=' "${dir}/summary.txt" 2>/dev/null || true)"
+    analysis_generate "$dir" "$final_line" >/dev/null
+    cat "${dir}/analysis.txt" 2>/dev/null || printf 'unable to generate analysis\n'
+}
+
 cmd_test_panic() {
     "${ROOT_DIR}/scripts/panic.sh" --test-panic
 }
@@ -298,6 +333,9 @@ main() {
             ;;
         --last-incident)
             cmd_last_incident
+            ;;
+        --last-analysis)
+            cmd_last_analysis
             ;;
         --test-panic)
             cmd_test_panic

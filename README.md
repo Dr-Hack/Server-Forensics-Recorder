@@ -16,6 +16,17 @@ Monitoring tells you **that** a problem happened.
 Server Forensics Recorder preserves evidence so you can determine **why** it
 happened.
 
+> ### ⭐ New: Automatic root-cause analysis
+>
+> The recorder no longer just captures raw snapshots — it now performs a
+> **first-pass forensic investigation for you**. Every incident closes with an
+> `analysis.txt` that names the most likely responsible subsystem, a confidence
+> level, the supporting evidence, and the next investigation step. It was built
+> to answer the hardest question this stack throws at you: *why is load very high
+> while CPU is almost idle?* — by capturing which processes went into
+> uninterruptible **D-state** and, crucially, **what kernel wait channel they
+> were blocked on**. See [Automatic Root-Cause Analysis](#automatic-root-cause-analysis).
+
 ## Why This Exists
 
 Intermittent outages often disappear before an administrator can log in. Load
@@ -47,6 +58,10 @@ snapshots are tuned for cPanel-style hosting stacks.
 
 ## Highlights
 
+- **Automatic root-cause analysis** — every incident ends with a human-readable
+  `analysis.txt` (likely subsystem + confidence + evidence + next steps)
+- **D-state / blocking forensics** — records which processes blocked and on which
+  kernel wait channel, the answer to "high load, low CPU"
 - Tiny normal overhead
 - One lightweight sample per minute
 - Panic mode only when thresholds trip
@@ -112,6 +127,7 @@ so run them with `sudo`.
 | `server-forensics --tail [N]` | Print the last `N` samples from `current.log` (default 10). |
 | `server-forensics --incidents` | List recorded incidents, newest first, with their trigger reason. |
 | `server-forensics --last-incident` | Print the summary of the most recent incident. |
+| `server-forensics --last-analysis` | Print the auto-generated root-cause analysis (`analysis.txt`) of the latest incident. |
 | `server-forensics --test-panic` | Create and close a safe incident with no expensive diagnostics. |
 | `server-forensics --collect` | Take one lightweight sample now and append it to `current.log`. |
 | `server-forensics --watch` | Run one full watcher cycle (collect, evaluate thresholds, panic if tripped). |
@@ -130,8 +146,12 @@ server-forensics --tail 20
 # Analyze the most recent outage
 server-forensics --incidents
 server-forensics --last-incident
+# read the automated first-pass root-cause verdict:
+server-forensics --last-analysis
 # then drill into the captured diagnostics:
 less /var/log/server-forensics/incidents/incident-*/snapshot-1.log
+# and the D-state / blocking evidence behind the verdict:
+less /var/log/server-forensics/incidents/incident-*/dstate-1.log
 ```
 
 ## How It Works
@@ -171,6 +191,7 @@ Examples of collected fields:
 - Load average
 - CPU busy percentage (delta of `/proc/stat` between samples; `NA` on the first
   sample after boot)
+- IO wait percentage (from the same `/proc/stat` delta; no extra process spawned)
 - Memory and swap
 - Apache worker count
 - `lsphp` process count
@@ -199,10 +220,12 @@ When the watcher detects an unhealthy sample, it creates an incident directory:
 Typical files:
 
 ```text
-summary.txt
-snapshot-1.log
+summary.txt      # peak metrics + one-line root-cause verdict
+analysis.txt     # automated root-cause analysis (see below)
+snapshot-1.log   # general diagnostics
+dstate-1.log     # D-state / blocking evidence (wchan, kernel stacks, cron, ...)
 snapshot-2.log
-snapshot-3.log
+dstate-2.log
 ```
 
 Snapshot diagnostics include:
@@ -224,6 +247,73 @@ Snapshot diagnostics include:
 - `apachectl status`
 
 Missing commands are skipped gracefully and recorded in the snapshot.
+
+## Automatic Root-Cause Analysis
+
+Several real production incidents on this stack were driven by processes piling
+up in uninterruptible **D-state**, producing very high load with almost idle
+CPU. Counting D-state processes told us *that* it was happening; it did not tell
+us *which* processes were blocked, *what* they were waiting on, or *why*.
+
+The recorder now answers those questions automatically. During panic mode each
+snapshot also writes a `dstate-N.log` capturing:
+
+- `ps -eo pid,user,state,wchan:40,comm,args`, and the **D-state processes alone**
+- per-PID `/proc/<pid>/stack` and `/proc/<pid>/wchan` (the kernel wait channel —
+  the single most valuable signal for a blocking stall)
+- `pstree -ap` to show which service spawned the blocked process
+- scheduled jobs (`systemctl list-timers`, `crontab -l`, `/etc/cron.*`)
+- maintenance / package / backup processes **detected** from the process table
+
+> Package managers (`dnf`, `yum`, `rpm`) are **detected, never invoked**. Running
+> them during a stall could block on locks or the network and make the recorder
+> part of the outage. Everything captured here is cheap `/proc` reads, bounded by
+> a timeout and a per-snapshot PID cap.
+
+When the incident recovers, `lib/analysis.sh` correlates this evidence into an
+`analysis.txt` using a transparent weighted-evidence model (wait channel →
+subsystem, corroborated by the blocked executable, running maintenance, peak IO
+wait, and low-CPU-beside-high-load). View it with:
+
+```bash
+server-forensics --last-analysis
+```
+
+Example output:
+
+```text
+Server Forensics Incident Analysis
+Incident: incident-20260721-013000
+
+Likely Cause:
+Backup
+
+Confidence:
+62%
+
+Evidence:
+  - 17 D-state (uninterruptible) processes at peak
+  - most blocked on wait channel 'ext4_writepages' (3 samples)
+  - most common blocked executable 'rsync' (1 samples)
+  - maintenance/package activity running: cpbackup rsync
+  - peak IO wait 63.4% (storage-bound)
+  - CPU only 14.0% despite load 41.2 — blocking, not compute
+  - Apache near-idle (8 workers)
+  - MariaDB near-idle (1 threads running)
+
+Recommended next investigation:
+  - Confirm the backup window (cPanel/JetBackup/rsync) vs incident time
+  - Throttle backup I/O (ionice/nice) or reschedule off peak
+```
+
+Subsystems it distinguishes: Filesystem, Disk, MariaDB, Apache, PHP, Backup,
+Package manager, Maintenance, Memory, Network, Kernel, and Unknown (when the
+captured evidence is genuinely inconclusive — it will not invent a cause).
+
+The classification is a **first pass** meant to point you at the right subsystem
+immediately after an outage. Always confirm against the raw `snapshot-*.log` and
+`dstate-*.log` before acting. The wait-channel → subsystem maps in
+`lib/analysis.sh` are easy to extend as you learn your server's real channels.
 
 ## Configuration
 

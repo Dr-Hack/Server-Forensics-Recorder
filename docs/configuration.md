@@ -47,6 +47,33 @@ PANIC_OUTPUT_LINES=5000
 - `PANIC_COMMAND_TIMEOUT`: Timeout for each panic diagnostic command.
 - `PANIC_OUTPUT_LINES`: Maximum lines captured from each diagnostic command.
 
+## D-state / Blocking Forensics
+
+```bash
+ENABLE_DSTATE_FORENSICS=1
+PANIC_CAPTURE_KERNEL_STACK=1
+PANIC_DSTATE_MAX_PIDS=25
+```
+
+Most incidents on the target server were driven by uninterruptible (D-state)
+processes producing very high load with low CPU. During each panic snapshot the
+recorder writes a `dstate-N.log` with the full `ps` wait-channel table, the
+D-state processes alone, per-PID kernel stacks, the process tree, scheduled
+jobs, and any detected maintenance/package/backup activity. All of it is cheap
+`/proc` reads; package managers are detected from the process table, never run.
+
+- `ENABLE_DSTATE_FORENSICS`: Master switch for the D-state capture and the
+  `analysis.txt` investigation engine.
+- `PANIC_CAPTURE_KERNEL_STACK`: Read `/proc/<pid>/stack` and `wchan` for blocked
+  processes. Needs root; some hardened kernels restrict it, in which case the
+  capture notes the value as unavailable and continues.
+- `PANIC_DSTATE_MAX_PIDS`: Cap on how many D-state PIDs get a kernel-stack read
+  per snapshot, so a storm of blocked tasks cannot make the recorder fan out.
+
+On incident close, `lib/analysis.sh` correlates this evidence into
+`analysis.txt` — most likely subsystem, confidence, evidence, and next steps —
+viewable with `server-forensics --last-analysis`.
+
 ## Collector Controls
 
 ```bash

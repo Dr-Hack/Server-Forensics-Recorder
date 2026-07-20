@@ -16,6 +16,7 @@ shellcheck -x \
     "$ROOT_DIR/scripts/watcher.sh" \
     "$ROOT_DIR/scripts/panic.sh" \
     "$ROOT_DIR/scripts/rotate.sh" \
+    "$ROOT_DIR/lib/analysis.sh" \
     "$ROOT_DIR/lib/incident.sh" \
     "$ROOT_DIR/lib/logging.sh" \
     "$ROOT_DIR/lib/metrics.sh" \

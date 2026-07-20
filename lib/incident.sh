@@ -87,6 +87,8 @@ incident_start() {
     incident_meta_set "$dir" peak_lsphp "$(metric_value "$metric_line" lsphp_count)"
     incident_meta_set "$dir" lowest_mem_available "$(metric_value "$metric_line" mem_available_mb)"
     incident_meta_set "$dir" peak_established "$(metric_value "$metric_line" tcp_established)"
+    incident_meta_set "$dir" peak_dstate "$(metric_value "$metric_line" dstate_processes)"
+    incident_meta_set "$dir" peak_iowait "$(metric_value "$metric_line" iowait_pct)"
 
     {
         printf 'Incident ID: %s\n' "$id"
@@ -101,23 +103,32 @@ incident_start() {
 incident_update_peaks() {
     local dir="$1"
     local metric_line="$2"
-    local load1 lsphp mem_available established
+    local load1 lsphp mem_available established dstate iowait
     local old_peak_load old_peak_lsphp old_low_mem old_peak_established
+    local old_peak_dstate old_peak_iowait
 
     load1="$(metric_value "$metric_line" load1)"
     lsphp="$(metric_value "$metric_line" lsphp_count)"
     mem_available="$(metric_value "$metric_line" mem_available_mb)"
     established="$(metric_value "$metric_line" tcp_established)"
+    dstate="$(metric_value "$metric_line" dstate_processes)"
+    iowait="$(metric_value "$metric_line" iowait_pct)"
 
     old_peak_load="$(incident_meta_get "$dir" peak_load 0)"
     old_peak_lsphp="$(incident_meta_get "$dir" peak_lsphp 0)"
     old_low_mem="$(incident_meta_get "$dir" lowest_mem_available "$mem_available")"
     old_peak_established="$(incident_meta_get "$dir" peak_established 0)"
+    old_peak_dstate="$(incident_meta_get "$dir" peak_dstate 0)"
+    old_peak_iowait="$(incident_meta_get "$dir" peak_iowait 0)"
 
     incident_meta_set "$dir" peak_load "$(num_max "${load1:-0}" "${old_peak_load:-0}")"
     incident_meta_set "$dir" peak_lsphp "$(num_max "${lsphp:-0}" "${old_peak_lsphp:-0}")"
     incident_meta_set "$dir" lowest_mem_available "$(num_min "${mem_available:-0}" "${old_low_mem:-0}")"
     incident_meta_set "$dir" peak_established "$(num_max "${established:-0}" "${old_peak_established:-0}")"
+    # iowait_pct is NA until a CPU baseline exists; num_max treats NA as 0, so a
+    # transient NA never clobbers a real peak.
+    incident_meta_set "$dir" peak_dstate "$(num_max "${dstate:-0}" "${old_peak_dstate:-0}")"
+    incident_meta_set "$dir" peak_iowait "$(num_max "${iowait:-0}" "${old_peak_iowait:-0}")"
 }
 
 incident_increment_snapshots() {
@@ -149,6 +160,8 @@ incident_close() {
         printf 'Duration: %s seconds\n' "$duration"
         printf 'Peak Load: %s\n' "$(incident_meta_get "$dir" peak_load 0)"
         printf 'Peak lsphp: %s\n' "$(incident_meta_get "$dir" peak_lsphp 0)"
+        printf 'Peak D-state Processes: %s\n' "$(incident_meta_get "$dir" peak_dstate 0)"
+        printf 'Peak IO Wait: %s%%\n' "$(incident_meta_get "$dir" peak_iowait 0)"
         printf 'Lowest Available Memory: %s MB\n' "$(incident_meta_get "$dir" lowest_mem_available 0)"
         printf 'Peak Connections: %s established\n' "$(incident_meta_get "$dir" peak_established 0)"
         printf 'Reason Triggered: %s\n' "$reason"
