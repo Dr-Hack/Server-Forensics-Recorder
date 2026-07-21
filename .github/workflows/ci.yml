@@ -31,6 +31,9 @@ jobs:
       - name: Run bash syntax checks
         run: bash tests/syntax.sh
 
+      - name: Run analysis engine tests
+        run: bash tests/analysis.sh
+
       - name: Check shfmt formatting
         run: bash tests/format.sh
 

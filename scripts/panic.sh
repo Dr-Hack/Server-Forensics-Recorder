@@ -124,6 +124,39 @@ capture_dstate_kernel_stacks() {
     done
 }
 
+# Captures PSI (Pressure Stall Information) from /proc/pressure and raises the
+# incident's PSI peaks. PSI is the single best signal for telling a storage stall
+# apart from a CPU or memory stall when utilisation looks low: it reports the
+# fraction of the last 10s that tasks were stalled waiting on each resource. All
+# three are tiny /proc reads. Skips gracefully on kernels without CONFIG_PSI.
+capture_psi() {
+    local dir="$1"
+    local file="$2"
+    local -a psi=()
+
+    append_header "$file" "PSI (pressure stall information)"
+
+    if [[ ! -d /proc/pressure ]]; then
+        printf 'SKIPPED: /proc/pressure not present (kernel lacks CONFIG_PSI)\n' >>"$file"
+        return 0
+    fi
+
+    local res
+    for res in io cpu memory; do
+        printf '\n--- /proc/pressure/%s ---\n' "$res" >>"$file"
+        if [[ -r "/proc/pressure/${res}" ]]; then
+            cat "/proc/pressure/${res}" 2>/dev/null >>"$file" || printf '[unreadable]\n' >>"$file"
+        else
+            printf '[unavailable]\n' >>"$file"
+        fi
+    done
+
+    mapfile -t psi < <(read_psi_avg10 | tr ' ' '\n')
+    # read_psi_avg10 emits: io_some io_full cpu_some mem_some mem_full
+    incident_update_psi_peaks "$dir" \
+        "${psi[0]:-NA}" "${psi[1]:-NA}" "${psi[2]:-NA}" "${psi[3]:-NA}" "${psi[4]:-NA}"
+}
+
 # Captures the D-state / blocking picture into its own file so the analysis
 # engine (and a human) can parse it without wading through the general snapshot.
 # Everything here is a cheap /proc or metadata read; package managers are
@@ -149,6 +182,12 @@ capture_forensics() {
 
     if sf_bool "${PANIC_CAPTURE_KERNEL_STACK:-1}"; then
         capture_dstate_kernel_stacks "$file"
+    fi
+
+    # PSI: how long tasks were actually stalled on I/O, CPU, and memory — the
+    # measurement that distinguishes a storage stall from CPU or memory pressure.
+    if sf_bool "${PANIC_CAPTURE_PSI:-1}"; then
+        capture_psi "$dir" "$file"
     fi
 
     # Which service spawned the blocked processes.
@@ -274,7 +313,7 @@ main() {
 
         if metrics_are_healthy "$metric_line"; then
             incident_close "$dir" "$metric_line"
-            analysis_generate "$dir" "$metric_line" || log_warn "analysis generation failed"
+            analysis_generate "$dir" || log_warn "analysis generation failed"
             log_warn "panic mode recovered and incident closed: ${dir}"
             "${SCRIPT_DIR}/rotate.sh" >/dev/null 2>&1 || log_warn "rotation failed"
             return 0

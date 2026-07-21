@@ -89,6 +89,12 @@ incident_start() {
     incident_meta_set "$dir" peak_established "$(metric_value "$metric_line" tcp_established)"
     incident_meta_set "$dir" peak_dstate "$(metric_value "$metric_line" dstate_processes)"
     incident_meta_set "$dir" peak_iowait "$(metric_value "$metric_line" iowait_pct)"
+    # PSI peaks are captured from /proc/pressure during panic, not from the
+    # lightweight metric line, so they start at 0 and are raised by
+    # incident_update_psi_peaks as snapshots are taken.
+    incident_meta_set "$dir" peak_psi_io_full 0
+    incident_meta_set "$dir" peak_psi_cpu_some 0
+    incident_meta_set "$dir" peak_psi_mem_full 0
 
     {
         printf 'Incident ID: %s\n' "$id"
@@ -131,6 +137,28 @@ incident_update_peaks() {
     incident_meta_set "$dir" peak_iowait "$(num_max "${iowait:-0}" "${old_peak_iowait:-0}")"
 }
 
+# Raises the tracked PSI peaks from a set of avg10 readings. Arguments, in the
+# order read_psi_avg10 emits them: io_some io_full cpu_some mem_some mem_full.
+# Only the three most diagnostic values are retained as peaks: io "full" (all
+# tasks stalled on I/O — storage-bound), cpu "some" (scheduling delay), and mem
+# "full" (memory stall). num_max treats the NA sentinel as 0, so a kernel without
+# PSI never clobbers a real peak.
+incident_update_psi_peaks() {
+    local dir="$1"
+    local io_full="${3:-NA}"
+    local cpu_some="${4:-NA}"
+    local mem_full="${6:-NA}"
+    local old_io old_cpu old_mem
+
+    old_io="$(incident_meta_get "$dir" peak_psi_io_full 0)"
+    old_cpu="$(incident_meta_get "$dir" peak_psi_cpu_some 0)"
+    old_mem="$(incident_meta_get "$dir" peak_psi_mem_full 0)"
+
+    incident_meta_set "$dir" peak_psi_io_full "$(num_max "${io_full:-0}" "${old_io:-0}")"
+    incident_meta_set "$dir" peak_psi_cpu_some "$(num_max "${cpu_some:-0}" "${old_cpu:-0}")"
+    incident_meta_set "$dir" peak_psi_mem_full "$(num_max "${mem_full:-0}" "${old_mem:-0}")"
+}
+
 incident_increment_snapshots() {
     local dir="$1"
     local current
@@ -149,6 +177,9 @@ incident_close() {
     ended_epoch="$(now_epoch)"
     started_epoch="$(incident_meta_get "$dir" started_epoch "$ended_epoch")"
     duration=$((ended_epoch - started_epoch))
+    # Persist the end boundary so the analysis engine can slice current.log to the
+    # incident window when reconstructing the timeline.
+    incident_meta_set "$dir" ended_epoch "$ended_epoch"
     id="$(incident_meta_get "$dir" id "$(basename "$dir")")"
     reason="$(incident_meta_get "$dir" reason unknown)"
     snapshots="$(incident_meta_get "$dir" snapshots 0)"
@@ -162,6 +193,9 @@ incident_close() {
         printf 'Peak lsphp: %s\n' "$(incident_meta_get "$dir" peak_lsphp 0)"
         printf 'Peak D-state Processes: %s\n' "$(incident_meta_get "$dir" peak_dstate 0)"
         printf 'Peak IO Wait: %s%%\n' "$(incident_meta_get "$dir" peak_iowait 0)"
+        printf 'Peak PSI io (full avg10): %s\n' "$(incident_meta_get "$dir" peak_psi_io_full 0)"
+        printf 'Peak PSI cpu (some avg10): %s\n' "$(incident_meta_get "$dir" peak_psi_cpu_some 0)"
+        printf 'Peak PSI memory (full avg10): %s\n' "$(incident_meta_get "$dir" peak_psi_mem_full 0)"
         printf 'Lowest Available Memory: %s MB\n' "$(incident_meta_get "$dir" lowest_mem_available 0)"
         printf 'Peak Connections: %s established\n' "$(incident_meta_get "$dir" peak_established 0)"
         printf 'Reason Triggered: %s\n' "$reason"

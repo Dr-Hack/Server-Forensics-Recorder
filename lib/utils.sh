@@ -80,6 +80,7 @@ load_config() {
     ENABLE_DSTATE_FORENSICS="${ENABLE_DSTATE_FORENSICS:-1}"
     PANIC_CAPTURE_KERNEL_STACK="${PANIC_CAPTURE_KERNEL_STACK:-1}"
     PANIC_DSTATE_MAX_PIDS="${PANIC_DSTATE_MAX_PIDS:-25}"
+    PANIC_CAPTURE_PSI="${PANIC_CAPTURE_PSI:-1}"
     ENABLE_PLUGINS="${ENABLE_PLUGINS:-1}"
     PLUGIN_TIMEOUT="${PLUGIN_TIMEOUT:-1}"
     PLUGIN_DIRS="${PLUGIN_DIRS:-${SF_ROOT}/plugins/metrics:/etc/server-forensics/plugins/metrics}"
@@ -163,6 +164,7 @@ validate_config() {
 
     sf_is_bool_value "$ENABLE_DSTATE_FORENSICS" || fail_config "ENABLE_DSTATE_FORENSICS must be a boolean value"
     sf_is_bool_value "$PANIC_CAPTURE_KERNEL_STACK" || fail_config "PANIC_CAPTURE_KERNEL_STACK must be a boolean value"
+    sf_is_bool_value "$PANIC_CAPTURE_PSI" || fail_config "PANIC_CAPTURE_PSI must be a boolean value"
     is_uint "$PANIC_DSTATE_MAX_PIDS" || fail_config "PANIC_DSTATE_MAX_PIDS must be a non-negative integer"
     [[ "$PANIC_DSTATE_MAX_PIDS" -ge 1 ]] || fail_config "PANIC_DSTATE_MAX_PIDS must be at least 1"
 

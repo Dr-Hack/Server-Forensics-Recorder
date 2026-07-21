@@ -210,6 +210,53 @@ read_dstate_processes() {
     ps -eo stat= 2>/dev/null | awk '$1 ~ /^D/ { c++ } END { print c + 0 }'
 }
 
+# Reads PSI (Pressure Stall Information) avg10 values from /proc/pressure and
+# prints five space-separated numbers, in order:
+#   io_some io_full cpu_some mem_some mem_full
+# Each is a percentage of the last 10 seconds that tasks were stalled, or NA when
+# the counter is unavailable. "full" means every non-idle task was stalled (the
+# strongest evidence of a genuine resource stall); "some" means at least one was.
+# The cpu file exposes only "some" on most kernels, so cpu_full is not reported.
+# Kernels without CONFIG_PSI have no /proc/pressure directory at all — every
+# field is NA and callers treat that as "PSI unavailable". Pure /proc reads.
+read_psi_field() {
+    # $1 = pressure file, $2 = line prefix (some|full)
+    local file="$1"
+    local kind="$2"
+
+    [[ -r "$file" ]] || {
+        printf 'NA\n'
+        return 0
+    }
+
+    awk -v kind="$kind" '
+        $1 == kind {
+            for (i = 2; i <= NF; i++) {
+                if (index($i, "avg10=") == 1) {
+                    sub("avg10=", "", $i)
+                    print $i
+                    found = 1
+                    exit
+                }
+            }
+        }
+        END { if (!found) print "NA" }
+    ' "$file" 2>/dev/null || printf 'NA\n'
+}
+
+read_psi_avg10() {
+    local io_some io_full cpu_some mem_some mem_full
+
+    io_some="$(read_psi_field /proc/pressure/io some)"
+    io_full="$(read_psi_field /proc/pressure/io full)"
+    cpu_some="$(read_psi_field /proc/pressure/cpu some)"
+    mem_some="$(read_psi_field /proc/pressure/memory some)"
+    mem_full="$(read_psi_field /proc/pressure/memory full)"
+
+    printf '%s %s %s %s %s\n' \
+        "$io_some" "$io_full" "$cpu_some" "$mem_some" "$mem_full"
+}
+
 collect_metrics_line() {
     local timestamp epoch uptime load1 load5 load15 cpu_busy iowait_pct
     local mem_total mem_available swap_total swap_free

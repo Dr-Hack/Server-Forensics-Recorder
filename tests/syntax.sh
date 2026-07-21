@@ -17,6 +17,7 @@ SHELL_FILES=(
     "$ROOT_DIR/lib/metrics.sh"
     "$ROOT_DIR/lib/plugins.sh"
     "$ROOT_DIR/lib/utils.sh"
+    "$ROOT_DIR/tests/analysis.sh"
     "$ROOT_DIR/tests/format.sh"
     "$ROOT_DIR/tests/lint.sh"
     "$ROOT_DIR/tests/syntax.sh"

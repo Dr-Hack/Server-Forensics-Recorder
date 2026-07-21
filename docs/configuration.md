@@ -53,6 +53,7 @@ PANIC_OUTPUT_LINES=5000
 ENABLE_DSTATE_FORENSICS=1
 PANIC_CAPTURE_KERNEL_STACK=1
 PANIC_DSTATE_MAX_PIDS=25
+PANIC_CAPTURE_PSI=1
 ```
 
 Most incidents on the target server were driven by uninterruptible (D-state)
@@ -69,10 +70,18 @@ jobs, and any detected maintenance/package/backup activity. All of it is cheap
   capture notes the value as unavailable and continues.
 - `PANIC_DSTATE_MAX_PIDS`: Cap on how many D-state PIDs get a kernel-stack read
   per snapshot, so a storm of blocked tasks cannot make the recorder fan out.
+- `PANIC_CAPTURE_PSI`: Capture PSI (Pressure Stall Information) from
+  `/proc/pressure/{io,cpu,memory}` during each panic snapshot, and track the peak
+  io/cpu/memory pressure for the incident. On a PSI-capable kernel this is the
+  single best signal for distinguishing a storage stall from a CPU or memory
+  stall even when utilisation looks low. Three tiny `/proc` reads; skipped
+  gracefully when the kernel lacks `CONFIG_PSI`.
 
 On incident close, `lib/analysis.sh` correlates this evidence into
-`analysis.txt` — most likely subsystem, confidence, evidence, and next steps —
-viewable with `server-forensics --last-analysis`.
+`analysis.txt` — observed facts, inference, an evidence ledger, a confidence
+distribution gated by missing evidence, a proven/inferred/unknown split, a
+reconstructed timeline, and recurring patterns across past incidents — viewable
+with `server-forensics --last-analysis`.
 
 ## Collector Controls
 

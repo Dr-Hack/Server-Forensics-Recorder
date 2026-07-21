@@ -6,6 +6,24 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **PSI (Pressure Stall Information) capture.** Each panic snapshot now records
+  `/proc/pressure/{io,cpu,memory}` into `dstate-N.log`, and incidents track
+  `peak_psi_io_full`, `peak_psi_cpu_some`, and `peak_psi_mem_full`. On a
+  PSI-capable kernel this is the single best signal for telling a storage stall
+  apart from a CPU or memory stall even when utilisation looks low. Three tiny
+  `/proc` reads; skipped gracefully without `CONFIG_PSI`. Gated by
+  `PANIC_CAPTURE_PSI`.
+- **Evidence-based analysis report.** `analysis.txt` now separates **Observed
+  facts -> Inference -> Evidence ledger -> Confidence distribution -> Proven /
+  Inferred / Unknown -> Timeline -> Recurring patterns -> Next steps -> Missing
+  evidence**. Confidence is a per-hypothesis distribution that is **gated by
+  missing evidence**: when the decisive kernel signals (wait channel, blocked
+  stack) were not captured, specific-cause confidence is capped and the cap is
+  stated explicitly, so the report never overstates certainty and never reaches
+  100%. A correlation engine folds recurring findings across past incidents
+  (e.g. "Apache idle in 8/8 incidents") using a compact per-incident `.facts`
+  file, and a timeline is reconstructed from the `current.log` samples that span
+  the incident window. Covered by `tests/analysis.sh`.
 - **D-state / blocking forensics.** Each panic snapshot now writes a
   `dstate-N.log` recording `ps -eo pid,user,state,wchan:40,comm,args`, the
   D-state processes alone, per-PID `/proc/<pid>/stack` and `wchan` (capped by

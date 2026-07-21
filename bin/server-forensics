@@ -298,9 +298,7 @@ cmd_last_analysis() {
         printf 'analysis.txt not found; generating from captured evidence:\n\n'
     fi
 
-    local final_line
-    final_line="$(grep -m1 'cpu_busy_pct=' "${dir}/summary.txt" 2>/dev/null || true)"
-    analysis_generate "$dir" "$final_line" >/dev/null
+    analysis_generate "$dir" >/dev/null
     cat "${dir}/analysis.txt" 2>/dev/null || printf 'unable to generate analysis\n'
 }
 

@@ -59,16 +59,32 @@ D-state counts with low CPU.
 - **IO wait** — `iowait_pct` added to the lightweight sample from the existing
   `/proc/stat` delta (no `vmstat`/`iostat` spawn); incidents track `peak_iowait`
   and `peak_dstate`.
-- **`analysis.txt`** — `lib/analysis.sh` correlates the evidence at incident
-  close into a likely subsystem + confidence + evidence + next steps, folds a
-  one-line verdict into `summary.txt`, and is viewable via `--last-analysis`.
-  The classifier is a transparent weighted-evidence model (wchan → subsystem,
-  corroborated by blocked executable, running maintenance, IO wait, and
-  low-CPU-vs-high-load), so the confidence figure is explainable.
+- **`analysis.txt` (evidence-based reporter)** — `lib/analysis.sh` turns the
+  captured evidence at incident close into a report that separates **Observed
+  facts → Inference → Evidence ledger → Confidence distribution → Proven /
+  Inferred / Unknown → Timeline → Recurring patterns → Next steps → Missing
+  evidence**. Confidence is a per-hypothesis distribution **gated by missing
+  evidence**: without a readable wait channel or kernel stack, specific-cause
+  confidence is capped (and the cap and its reason are printed), so it never
+  overstates and never reaches 100%. Folds a one-line verdict into `summary.txt`,
+  viewable via `--last-analysis`, and covered by `tests/analysis.sh`.
+- **PSI capture (shipped)** — each panic snapshot records
+  `/proc/pressure/{io,cpu,memory}` and the incident tracks peak io/cpu/memory
+  pressure. This is the signal that proves whether a "high load, low CPU" stall
+  was storage-, CPU-, or memory-bound, and it feeds the classifier and the
+  Proven tier directly. Gated by `PANIC_CAPTURE_PSI`.
+- **Correlation engine (shipped)** — a compact per-incident `.facts` file lets
+  the reporter fold recurring findings across all recorded incidents (e.g.
+  "Apache idle in 8/8", "high D-state in 7/8") into every analysis, robust even
+  after old `dstate-*.log` files are rotated away.
+- **Timeline (shipped)** — reconstructed from the `current.log` samples spanning
+  the incident window, annotated with the transitions (load crossing threshold,
+  D-state climbing, IO-wait spikes, recovery).
 
-Tuning note: the wchan/comm → subsystem maps in `lib/analysis.sh` are seeded
-from general Linux knowledge. Feed real `dstate-*.log` output from a production
-incident back in to sharpen them for this server's actual wait channels.
+Tuning note: the wchan/comm → subsystem maps and the scoring weights in
+`lib/analysis.sh` are seeded from general Linux knowledge. Feed real
+`dstate-*.log` output and PSI peaks from a production incident back in to sharpen
+them for this server's actual wait channels.
 
 ---
 
@@ -93,7 +109,9 @@ summarization pipelines. (`--health-json` already exists as a starting point.)
 
 ### `summarize INCIDENT` command
 Human-readable incident digest: duration, peak load / lsphp / memory /
-connections, likely bottleneck, recommended next investigation.
+connections, likely bottleneck, recommended next investigation. Mostly covered
+now by `analysis.txt` + `--last-analysis`; what remains is a compact one-screen
+digest and the ability to target an arbitrary past incident by id.
 
 ---
 
@@ -105,7 +123,11 @@ connections, likely bottleneck, recommended next investigation.
 | Performance / overhead | Excellent |
 | Code organization | Good |
 | Metrics | Good — CPU and MariaDB now correct |
-| Forensic capability | Good |
+| Forensic capability | Strong — evidence-based analysis, PSI, timeline, correlation |
+| Root-cause reasoning | Strong — observed/inferred/proven with evidence-gated confidence |
 
-The project is already useful in production. The highest-value remaining work is
-**trend detection**, since it turns raw samples into an explanation.
+The project is already useful in production. With the evidence-based reporter,
+PSI capture, timeline, and correlation engine in place, the highest-value
+remaining work is **feeding real production `dstate-*.log` + PSI peaks back into
+the wchan/comm maps and scoring weights**, then **trend detection** to turn raw
+samples in `summary.txt` into a plain-language explanation.

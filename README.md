@@ -20,12 +20,15 @@ happened.
 >
 > The recorder no longer just captures raw snapshots — it now performs a
 > **first-pass forensic investigation for you**. Every incident closes with an
-> `analysis.txt` that names the most likely responsible subsystem, a confidence
-> level, the supporting evidence, and the next investigation step. It was built
-> to answer the hardest question this stack throws at you: *why is load very high
-> while CPU is almost idle?* — by capturing which processes went into
-> uninterruptible **D-state** and, crucially, **what kernel wait channel they
-> were blocked on**. See [Automatic Root-Cause Analysis](#automatic-root-cause-analysis).
+> `analysis.txt` that separates **observed facts, inference, and proof**, ranks
+> the likely causes with a confidence that is **gated by missing evidence** (it
+> never overstates and never reaches 100%), reconstructs a **timeline**, and
+> correlates **recurring patterns** across past incidents. It was built to answer
+> the hardest question this stack throws at you: *why is load very high while CPU
+> is almost idle?* — by capturing which processes went into uninterruptible
+> **D-state**, **what kernel wait channel they were blocked on**, and the **PSI**
+> pressure that proves whether the stall was storage, CPU, or memory. See
+> [Automatic Root-Cause Analysis](#automatic-root-cause-analysis).
 
 ## Why This Exists
 
@@ -59,9 +62,11 @@ snapshots are tuned for cPanel-style hosting stacks.
 ## Highlights
 
 - **Automatic root-cause analysis** — every incident ends with a human-readable
-  `analysis.txt` (likely subsystem + confidence + evidence + next steps)
-- **D-state / blocking forensics** — records which processes blocked and on which
-  kernel wait channel, the answer to "high load, low CPU"
+  `analysis.txt` separating observed / inferred / proven, with an
+  evidence-gated confidence distribution, a timeline, and cross-incident patterns
+- **D-state / blocking forensics** — records which processes blocked, on which
+  kernel wait channel, and the **PSI** pressure behind it, the answer to
+  "high load, low CPU"
 - Tiny normal overhead
 - One lightweight sample per minute
 - Panic mode only when thresholds trip
@@ -261,6 +266,9 @@ snapshot also writes a `dstate-N.log` capturing:
 - `ps -eo pid,user,state,wchan:40,comm,args`, and the **D-state processes alone**
 - per-PID `/proc/<pid>/stack` and `/proc/<pid>/wchan` (the kernel wait channel —
   the single most valuable signal for a blocking stall)
+- **PSI** from `/proc/pressure/{io,cpu,memory}` (Pressure Stall Information) —
+  how long tasks were actually stalled on each resource, which distinguishes a
+  storage stall from a CPU or memory stall even when utilisation looks low
 - `pstree -ap` to show which service spawned the blocked process
 - scheduled jobs (`systemctl list-timers`, `crontab -l`, `/etc/cron.*`)
 - maintenance / package / backup processes **detected** from the process table
@@ -270,50 +278,88 @@ snapshot also writes a `dstate-N.log` capturing:
 > part of the outage. Everything captured here is cheap `/proc` reads, bounded by
 > a timeout and a per-snapshot PID cap.
 
-When the incident recovers, `lib/analysis.sh` correlates this evidence into an
-`analysis.txt` using a transparent weighted-evidence model (wait channel →
-subsystem, corroborated by the blocked executable, running maintenance, peak IO
-wait, and low-CPU-beside-high-load). View it with:
+When the incident recovers, `lib/analysis.sh` turns this evidence into an
+`analysis.txt` that reasons like an incident investigator rather than asserting a
+single cause. It deliberately separates what was **measured**, what is
+**inferred**, and what is **proven**, and its confidence is a per-hypothesis
+distribution that is **gated by missing evidence** — when the decisive kernel
+signals (wait channel, blocked stack, PSI) were not captured, specific-cause
+confidence is capped and the cap is stated explicitly. It never reaches 100%.
+View it with:
 
 ```bash
 server-forensics --last-analysis
 ```
 
-Example output:
+The report contains, in order: **Observed facts** (measurements, no
+interpretation) → **Inference** (reasoning from the facts) → **Evidence ledger**
+(a ✓/✗ checklist for the leading cause, plus the confidence cap and its reason) →
+**Confidence distribution** (every hypothesis, highest first) → **Proven /
+Inferred / Unknown** → **Timeline** (reconstructed from the incident's samples) →
+**Recurring patterns** (correlated across past incidents) → **Recommended next
+investigation** → **Missing evidence** to capture next time.
+
+Abridged example:
 
 ```text
-Server Forensics Incident Analysis
-Incident: incident-20260721-013000
+LIKELY CAUSE: Filesystem wait (95%)
+Mechanism:    blocked (uninterruptible) tasks (90%)
 
-Likely Cause:
-Backup
+-- Observed facts (measured, no interpretation) --
+  - Peak load: 41.2
+  - CPU at peak load: 12.0% (window min 8%)
+  - Peak IO wait: 27.0%
+  - Peak D-state processes: 14
+  - PSI io full avg10 (peak): 78.4
+  - Wait channels: captured
 
-Confidence:
-62%
+Confidence distribution:
+  Filesystem wait ...................  95%
+  Blocked (uninterruptible) tasks ...  90%
+  Maintenance interaction ...........  50%
+  Disk / block layer ................  33%
+  MariaDB bottleneck ................   3%
+  Apache overload ...................   2%
 
-Evidence:
-  - 17 D-state (uninterruptible) processes at peak
-  - most blocked on wait channel 'ext4_writepages' (3 samples)
-  - most common blocked executable 'rsync' (1 samples)
-  - maintenance/package activity running: cpbackup rsync
-  - peak IO wait 63.4% (storage-bound)
-  - CPU only 14.0% despite load 41.2 — blocking, not compute
-  - Apache near-idle (8 workers)
-  - MariaDB near-idle (1 threads running)
+Proven:
+  - Uninterruptible (D-state) blocking occurred: 14 task(s) counted directly.
+  - Not CPU-bound: CPU 12.0% at load 41.2 (measured).
+  - Stall class was I/O: PSI io full avg10 78.4 (direct kernel measurement).
+  - Blocked in kernel path: wait channel ext4_writepages (direct /proc read).
+Inferred:
+  - Filesystem wait is the most likely layer (95%), from the signals above.
+Unknown:
+  - (none)
 
-Recommended next investigation:
-  - Confirm the backup window (cPanel/JetBackup/rsync) vs incident time
-  - Throttle backup I/O (ionice/nice) or reschedule off peak
+Timeline:
+  01:30:00  load=3.0  cpu=8.0%  iowait=4.0%  dstate=1   <- incident window begins
+  01:30:30  load=22.0 cpu=11.0% iowait=24.0% dstate=9   <- load crosses threshold
+  01:31:00  load=41.2 cpu=12.0% iowait=27.0% dstate=14  <- D-state climbing
+  (recovery: load back below 10)
+
+Recurring patterns (across recorded incidents):
+  Apache idle .................. 8/8
+  High D-state ................. 7/8
+  IO wait > 20% ................ 6/8
+  PSI io-full high ............. 6/8
 ```
 
-Subsystems it distinguishes: Filesystem, Disk, MariaDB, Apache, PHP, Backup,
-Package manager, Maintenance, Memory, Network, Kernel, and Unknown (when the
-captured evidence is genuinely inconclusive — it will not invent a cause).
+When the decisive evidence is missing, the same report caps confidence and says
+so, e.g. `=> confidence for Filesystem wait capped at 65% because wait channel,
+kernel stack and PSI were not captured.`
+
+Hypotheses it distinguishes: Filesystem wait, Disk / block layer, MariaDB
+bottleneck, Apache overload, PHP overload, Memory exhaustion, Network / remote
+FS, Maintenance interaction, Package manager, and Kernel lock contention — plus
+the separate *mechanism* verdict "blocked (uninterruptible) tasks". When no
+specific cause clears the noise floor it reports **Inconclusive** rather than
+inventing one.
 
 The classification is a **first pass** meant to point you at the right subsystem
 immediately after an outage. Always confirm against the raw `snapshot-*.log` and
-`dstate-*.log` before acting. The wait-channel → subsystem maps in
-`lib/analysis.sh` are easy to extend as you learn your server's real channels.
+`dstate-*.log` before acting. The wait-channel → subsystem maps and the scoring
+weights in `lib/analysis.sh` are easy to extend as you learn your server's real
+channels.
 
 ## Configuration
 
@@ -343,6 +389,10 @@ Panic controls:
 PANIC_SNAPSHOT_INTERVAL=10
 PANIC_COMMAND_TIMEOUT=20
 PANIC_OUTPUT_LINES=5000
+ENABLE_DSTATE_FORENSICS=1
+PANIC_CAPTURE_KERNEL_STACK=1
+PANIC_DSTATE_MAX_PIDS=25
+PANIC_CAPTURE_PSI=1
 COLLECTOR_COMMAND_TIMEOUT=1
 ENABLE_PLUGINS=1
 PLUGIN_TIMEOUT=1
