@@ -6,6 +6,31 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Per-process I/O attribution.** System metrics established *that* the server
+  was storage-stalled; this establishes *which process moved the bytes*. Every
+  panic snapshot now captures `pidstat -d` (per-process read/write and block-I/O
+  delay), `pidstat -u` (per-process CPU over the same window), `iostat -x`
+  (per-device service times), `/proc/pressure/{io,cpu,memory}`,
+  `/proc/diskstats`, `mount` and `findmnt` into `io-N.log`. Processes are then
+  ranked into an **offending-processes table** by actual throughput, and every
+  process above `PANIC_IO_OFFENDER_PCT` of observed I/O gets a full detail block:
+  PID, PPID, user, state, executable, command line, elapsed time, working
+  directory, wait channel, open files (`lsof` and `/proc/PID/fd`) and cumulative
+  `/proc/PID/io` counters. The incident's worst offender is retained in meta
+  (`peak_io_pid`, `peak_io_comm`, `peak_io_kbs`) and printed in `summary.txt`, so
+  it survives rotation of the verbose captures.
+
+  The three sampling commands run **concurrently**, so the capture costs one
+  sampling window rather than three and cannot starve the panic snapshot loop.
+  `lsof` and every per-offender read is timeout-bounded, because a descriptor
+  pointing at a stalled mount must never hang the recorder. Ranking parses
+  `pidstat`'s own header rather than fixed column positions, so it works across
+  sysstat versions that differ in the `iodelay` and `kB_ccwr/s` columns.
+
+  New commands: `--offenders [ID]` for the ranked table, `--io [ID]` for the raw
+  capture. `--doctor` now checks for `pidstat`, `findmnt`, root, and PSI. Gated
+  by `ENABLE_IO_FORENSICS`; requires `sysstat`.
+
 - **PSI (Pressure Stall Information) capture.** Each panic snapshot now records
   `/proc/pressure/{io,cpu,memory}` into `dstate-N.log`, and incidents track
   `peak_psi_io_full`, `peak_psi_cpu_some`, and `peak_psi_mem_full`. On a

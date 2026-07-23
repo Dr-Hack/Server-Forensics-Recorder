@@ -34,6 +34,9 @@ jobs:
       - name: Run analysis engine tests
         run: bash tests/analysis.sh
 
+      - name: Run I/O attribution tests
+        run: bash tests/ioforensics.sh
+
       - name: Check shfmt formatting
         run: bash tests/format.sh
 

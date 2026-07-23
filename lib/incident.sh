@@ -95,6 +95,12 @@ incident_start() {
     incident_meta_set "$dir" peak_psi_io_full 0
     incident_meta_set "$dir" peak_psi_cpu_some 0
     incident_meta_set "$dir" peak_psi_mem_full 0
+    # Worst single-process disk throughput seen during the incident, raised by
+    # io_update_peaks as each snapshot's offender table is ranked. This survives
+    # rotation of the verbose per-snapshot captures.
+    incident_meta_set "$dir" peak_io_kbs 0
+    incident_meta_set "$dir" peak_io_pid none
+    incident_meta_set "$dir" peak_io_comm none
 
     {
         printf 'Incident ID: %s\n' "$id"
@@ -200,6 +206,10 @@ incident_close() {
         printf 'Peak Connections: %s established\n' "$(incident_meta_get "$dir" peak_established 0)"
         printf 'Reason Triggered: %s\n' "$reason"
         printf 'Snapshots Taken: %s\n' "$snapshots"
+        printf 'Top I/O Process: %s (pid %s) at %s kB/s\n' \
+            "$(incident_meta_get "$dir" peak_io_comm none)" \
+            "$(incident_meta_get "$dir" peak_io_pid none)" \
+            "$(incident_meta_get "$dir" peak_io_kbs 0)"
         printf '\nFinal lightweight metrics:\n%s\n' "$final_metric_line"
     } >"${dir}/summary.txt"
 

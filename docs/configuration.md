@@ -83,6 +83,53 @@ distribution gated by missing evidence, a proven/inferred/unknown split, a
 reconstructed timeline, and recurring patterns across past incidents — viewable
 with `server-forensics --last-analysis`.
 
+## Per-Process I/O Attribution
+
+```bash
+ENABLE_IO_FORENSICS=1
+PANIC_IO_SAMPLES=10
+PANIC_IO_INTERVAL=1
+PANIC_IO_OFFENDER_PCT=5
+PANIC_IO_MIN_OFFENDERS=3
+PANIC_IO_MAX_OFFENDERS=10
+PANIC_IO_TABLE_ROWS=20
+PANIC_IO_LSOF_LINES=60
+PANIC_IO_DETAIL_TIMEOUT=5
+```
+
+The metrics above establish *that* the server is storage-stalled. This
+establishes *which process moved the bytes* — the only question that follows
+from a yes, and the one a list of installed services cannot answer.
+
+- `ENABLE_IO_FORENSICS`: Capture per-process I/O attribution during each panic
+  snapshot into `io-N.log`, plus a machine-readable `offenders-N.tsv`. Requires
+  `sysstat` for `pidstat` and `iostat`; run `--doctor` to confirm.
+- `PANIC_IO_SAMPLES`, `PANIC_IO_INTERVAL`: The sampling window, as
+  samples x seconds. `pidstat -d`, `pidstat -u` and `iostat -x` all sample over
+  this window **concurrently**, so the wall-clock cost is one window, not three.
+  Note that the panic loop period becomes
+  `max(PANIC_SNAPSHOT_INTERVAL, PANIC_IO_SAMPLES * PANIC_IO_INTERVAL)`.
+- `PANIC_IO_OFFENDER_PCT`: A process is treated as an offender, and gets a full
+  detail block, when it accounts for more than this percentage of all observed
+  disk I/O in the window.
+- `PANIC_IO_MIN_OFFENDERS`, `PANIC_IO_MAX_OFFENDERS`: Always detail at least the
+  top N processes so a diffuse incident still yields something, and never more
+  than the maximum so a storm of writers cannot make the recorder fan out.
+- `PANIC_IO_LSOF_LINES`, `PANIC_IO_DETAIL_TIMEOUT`: Bounds on the per-offender
+  reads. `lsof` is run with `-b -w` and under `timeout`, because a descriptor
+  pointing at a stalled mount must never hang the recorder during the outage it
+  is recording.
+
+Each offender's block records PID, PPID, user, state, executable, command line,
+elapsed time, working directory, wait channel, open files (both `lsof` and
+`/proc/PID/fd`) and the cumulative `/proc/PID/io` byte counters — `read_bytes`
+and `write_bytes` are the ones that actually reached the block layer, while
+`rchar`/`wchar` include cache hits.
+
+The incident's worst offender is retained as `peak_io_pid`, `peak_io_comm` and
+`peak_io_kbs`, printed in `summary.txt`, and viewable with
+`server-forensics --offenders`. The raw capture is `server-forensics --io`.
+
 ## Collector Controls
 
 ```bash

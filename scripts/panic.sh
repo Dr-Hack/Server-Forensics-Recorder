@@ -16,6 +16,8 @@ source "${ROOT_DIR}/lib/metrics.sh"
 source "${ROOT_DIR}/lib/incident.sh"
 # shellcheck source=../lib/analysis.sh
 source "${ROOT_DIR}/lib/analysis.sh"
+# shellcheck source=../lib/ioforensics.sh
+source "${ROOT_DIR}/lib/ioforensics.sh"
 
 append_header() {
     local file="$1"
@@ -241,6 +243,14 @@ capture_snapshot() {
 
     if sf_bool "${ENABLE_DSTATE_FORENSICS:-1}"; then
         capture_forensics "$dir" "$index"
+    fi
+
+    # Per-process I/O attribution. This is what names the process actually moving
+    # bytes, as opposed to naming services that merely exist. Runs last in the
+    # snapshot because it is the only step with a sampling window; the three
+    # samplers inside it run concurrently so it costs one window, not three.
+    if sf_bool "${ENABLE_IO_FORENSICS:-1}"; then
+        capture_io_forensics "$dir" "$index"
     fi
 
     incident_increment_snapshots "$dir" >/dev/null

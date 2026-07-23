@@ -133,6 +133,8 @@ so run them with `sudo`.
 | `server-forensics --incidents` | List recorded incidents, newest first, with their trigger reason. |
 | `server-forensics --last-incident` | Print the summary of the most recent incident. |
 | `server-forensics --last-analysis` | Print the auto-generated root-cause analysis (`analysis.txt`) of the latest incident. |
+| `server-forensics --offenders [ID]` | **Which process was actually consuming I/O** — the offending-processes table ranked by disk read+write, merged across the incident's snapshots. Defaults to the latest incident. |
+| `server-forensics --io [ID]` | Full I/O attribution capture: `pidstat -d`/`-u`, `iostat -x`, PSI, `/proc/diskstats`, mounts, and per-offender `cmdline`/`cwd`/open files/`/proc/PID/io`. |
 | `server-forensics --test-panic` | Create and close a safe incident with no expensive diagnostics. |
 | `server-forensics --collect` | Take one lightweight sample now and append it to `current.log`. |
 | `server-forensics --watch` | Run one full watcher cycle (collect, evaluate thresholds, panic if tripped). |

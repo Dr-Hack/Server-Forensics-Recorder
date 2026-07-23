@@ -27,6 +27,8 @@ source "${ROOT_DIR}/lib/metrics.sh"
 source "${ROOT_DIR}/lib/incident.sh"
 # shellcheck source=../lib/analysis.sh
 source "${ROOT_DIR}/lib/analysis.sh"
+# shellcheck source=../lib/ioforensics.sh
+source "${ROOT_DIR}/lib/ioforensics.sh"
 
 usage() {
     cat <<'USAGE'
@@ -42,6 +44,10 @@ Commands:
   --incidents       List recorded incidents, newest first, with trigger reason.
   --last-incident   Print the summary of the most recent incident.
   --last-analysis   Print the auto-generated root-cause analysis of the latest incident.
+  --offenders [ID]  Print the offending-processes table (ranked by disk read+write)
+                    for incident ID, or the latest incident when ID is omitted.
+  --io [ID]         Print the full I/O attribution capture (pidstat, iostat, PSI,
+                    diskstats, mounts, per-offender /proc detail) for an incident.
   --test-panic      Create and close a safe test incident without expensive diagnostics.
   --watch           Run one watcher cycle.
   --collect         Run one collector cycle.
@@ -195,6 +201,8 @@ cmd_doctor() {
     check_command lsof
     check_command vmstat
     check_command iostat
+    check_command pidstat
+    check_command findmnt
     check_command journalctl
     check_command apachectl
 
@@ -204,6 +212,32 @@ cmd_doctor() {
         printf 'INFO service-exec=%s\n' "$(systemctl_value ExecStart server-forensics.service)"
     else
         printf 'WARN systemctl unavailable\n'
+    fi
+
+    # Per-process I/O attribution is the difference between naming a service and
+    # naming the process that moved the bytes, so its prerequisites are checked
+    # explicitly rather than left to fail silently mid-incident.
+    if sf_bool "${ENABLE_IO_FORENSICS:-1}"; then
+        if command_exists pidstat; then
+            printf 'OK   io-attribution: pidstat present\n'
+        else
+            printf 'WARN io-attribution: pidstat missing — install sysstat (dnf install sysstat)\n'
+        fi
+        if [[ "$(id -u 2>/dev/null || printf 1)" -eq 0 ]]; then
+            printf 'OK   io-attribution: running as root (/proc/<pid>/io readable)\n'
+        else
+            printf 'WARN io-attribution: not root — /proc/<pid>/io and wchan will be restricted\n'
+        fi
+        if [[ -d /proc/pressure ]]; then
+            printf 'OK   io-attribution: PSI available\n'
+        else
+            printf 'WARN io-attribution: /proc/pressure missing (kernel lacks CONFIG_PSI)\n'
+        fi
+        printf 'INFO io-attribution: window=%ss (%s x %ss), offender threshold=%s%%\n' \
+            "$((PANIC_IO_SAMPLES * PANIC_IO_INTERVAL))" \
+            "$PANIC_IO_SAMPLES" "$PANIC_IO_INTERVAL" "$PANIC_IO_OFFENDER_PCT"
+    else
+        printf 'INFO io-attribution disabled (ENABLE_IO_FORENSICS=0)\n'
     fi
 
     if [[ "$failures" -gt 0 ]]; then
@@ -302,6 +336,84 @@ cmd_last_analysis() {
     cat "${dir}/analysis.txt" 2>/dev/null || printf 'unable to generate analysis\n'
 }
 
+# Resolves an incident argument to a directory: an incident id, a bare
+# timestamp, or empty for the newest incident.
+resolve_incident() {
+    local wanted="${1:-}"
+
+    if [[ -z "$wanted" ]]; then
+        latest_incident
+        return 0
+    fi
+
+    local dir="${INCIDENT_DIR}/${wanted}"
+    [[ -d "$dir" ]] || dir="${INCIDENT_DIR}/incident-${wanted}"
+    if [[ ! -d "$dir" ]]; then
+        printf 'no such incident: %s\n' "$wanted" >&2
+        return 1
+    fi
+
+    printf '%s\n' "$dir"
+}
+
+# The answer to "which process was actually consuming I/O" — the incident-level
+# table, merged across every snapshot and ranked by peak observed throughput.
+cmd_offenders() {
+    local dir tsv rows
+    dir="$(resolve_incident "${1:-}")" || return 1
+
+    if [[ -z "$dir" ]]; then
+        printf 'no incidents recorded\n'
+        return 0
+    fi
+
+    printf 'incident-dir=%s\n' "$dir"
+    printf 'reason=%s\n\n' "$(incident_meta_get "$dir" reason unknown)"
+
+    tsv="$(io_aggregate_offenders "$dir")"
+    if [[ -z "$tsv" ]]; then
+        printf 'No per-process I/O data captured for this incident.\n\n'
+        printf 'Likely causes:\n'
+        printf '  - the incident predates I/O attribution (no offenders-*.tsv present)\n'
+        printf '  - sysstat is not installed (pidstat missing) — run --doctor\n'
+        printf '  - ENABLE_IO_FORENSICS=0 in the config\n'
+        return 0
+    fi
+
+    rows="$(mktemp 2>/dev/null || printf '%s' "${dir}/.offenders.tmp")"
+    printf '%s\n' "$tsv" >"$rows"
+    io_render_table "$rows"
+    rm -f -- "$rows" 2>/dev/null || true
+
+    printf '\nPeak single-process I/O this incident: %s kB/s (pid %s, %s)\n' \
+        "$(incident_meta_get "$dir" peak_io_kbs 0)" \
+        "$(incident_meta_get "$dir" peak_io_pid unknown)" \
+        "$(incident_meta_get "$dir" peak_io_comm unknown)"
+    printf 'Full capture (cmdline, cwd, open files, /proc/PID/io): %s --io %s\n' \
+        "$(basename "$0")" "$(basename "$dir")"
+}
+
+# Dumps the raw I/O attribution captures for an incident, newest snapshot last.
+cmd_io() {
+    local dir
+    dir="$(resolve_incident "${1:-}")" || return 1
+
+    if [[ -z "$dir" ]]; then
+        printf 'no incidents recorded\n'
+        return 0
+    fi
+
+    local -a logs=()
+    mapfile -t logs < <(find "$dir" -maxdepth 1 -type f -name 'io-*.log' 2>/dev/null | sort -V)
+
+    if [[ "${#logs[@]}" -eq 0 ]]; then
+        printf 'no I/O attribution captures in %s\n' "$dir" >&2
+        return 1
+    fi
+
+    cat "${logs[@]}"
+}
+
 cmd_test_panic() {
     "${ROOT_DIR}/scripts/panic.sh" --test-panic
 }
@@ -334,6 +446,12 @@ main() {
             ;;
         --last-analysis)
             cmd_last_analysis
+            ;;
+        --offenders)
+            cmd_offenders "${2:-}"
+            ;;
+        --io)
+            cmd_io "${2:-}"
             ;;
         --test-panic)
             cmd_test_panic
