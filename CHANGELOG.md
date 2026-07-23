@@ -2,7 +2,51 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## 0.2.0 — 2026-07-23
+
+Named causes are now backed by per-process measurement rather than by which
+service names happen to be present. See `docs/decisions.md` for the approaches
+this release removed and why.
+
+### Fixed
+
+- **Per-process I/O attribution produced an empty table on the target server.**
+  The ranking detected data rows with `$1 ~ /^[0-9]+$/`, assuming `pidstat -h`
+  emits an epoch timestamp. sysstat 11.7.3 on el8 with a 12-hour locale emits
+  `07:27:10 PM` — two whitespace-separated fields — so **every row was
+  discarded**, `offenders-*.tsv` was empty, and `Top I/O Process` read `none`
+  on a live incident with no error reported anywhere. Column indices are now
+  anchored from the left by a detected timestamp width, samplers run under
+  `S_TIME_FORMAT=ISO LC_ALL=C`, and the test suite carries verbatim production
+  output as a fixture.
+- **Resident daemons could be named as the cause.** Process-name presence scored
+  up to `+24`, enough to lead a verdict on a cPanel box where the Imunify360
+  daemons run permanently. Presence now scores `+2` and is capped below the
+  inconclusive floor; it earns real weight only when the same process is also
+  the measured top CPU or I/O consumer.
+- **The recorder detected its own processes as maintenance activity.** `timeout`
+  (the `run_with_timeout` wrapper) was listed as evidence. The exclusion list now
+  covers the recorder's helpers, and `gpg` no longer maps to "Package manager".
+- **The evidence ledger listed exclusions as support.** "No Apache pressure"
+  appeared under *Supported by* for unrelated verdicts. Support is now selected
+  per leading hypothesis, with exclusions in their own section.
+- **Recurring-pattern counts hid their denominator.** Incidents without `.facts`
+  were silently dropped; the count now states how many were skipped.
+
+### Added
+
+- **CPU saturation hypothesis and per-process CPU ranking.** `pidstat -u` was
+  already captured but never read. It is now ranked into a second offender table
+  (`cpuoffenders-*.tsv`), tracked as `peak_cpu_pid` / `peak_cpu_comm` /
+  `peak_cpu_pct`, printed in `summary.txt`, and scored into a "CPU saturation"
+  hypothesis. Without it the engine could not express "the box was simply busy",
+  and a compute-bound spike fell through to whatever noise-floor hypothesis
+  remained. `--offenders` now prints both tables, CPU first.
+- `PANIC_IO_MAX_TRACKED_PIDS` bounds the ranking arrays so a fork storm cannot
+  grow them without limit.
+- `docs/decisions.md` — a record of superseded approaches and why they failed.
+
+## 0.1.0
 
 ### Added
 

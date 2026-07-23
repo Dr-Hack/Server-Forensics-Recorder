@@ -66,6 +66,23 @@ analysis_top() {
     printf '%s\t%s\n' "$value" "$count"
 }
 
+# True when two process names refer to the same executable. `ps comm` truncates
+# to 15 characters and pidstat may report a slightly different form, so a plain
+# equality test would miss real matches; prefix containment in either direction
+# is the usable comparison.
+analysis_comm_matches() {
+    local a b
+    a="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+    b="$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')"
+
+    [[ -n "$a" && -n "$b" ]] || return 1
+    # Compare on the executable only; pidstat can append state text such as
+    # "lfd - sleeping".
+    b="${b%% *}"
+    [[ -n "$b" ]] || return 1
+    [[ "$a" == "$b" || "$a" == "$b"* || "$b" == "$a"* ]]
+}
+
 # Distinct maintenance / package / backup executables detected during the
 # incident, one per line. Field 6 of that section is comm.
 analysis_maintenance() {
@@ -141,7 +158,7 @@ analysis_comm_subsystem() {
         mariadbd | mysqld | mysql) printf 'MariaDB\n' ;;
         *httpd* | *apache2* | *lsapi*) printf 'Apache\n' ;;
         *lsphp* | *php-fpm* | php*) printf 'PHP\n' ;;
-        *dnf* | *yum* | *rpm* | *packagekit* | *gpg* | *leapp* | *upcp*) printf 'Package manager\n' ;;
+        *dnf* | *yum* | *rpm* | *packagekit* | *leapp* | *upcp*) printf 'Package manager\n' ;;
         *clamscan* | *freshclam* | *imunify* | *cagefs* | *updatedb* | *mlocate*) printf 'Maintenance\n' ;;
         *jbd2* | *xfsaild* | *flush* | kworker*) printf 'Filesystem\n' ;;
         *kswapd* | *kcompactd* | *khugepaged*) printf 'Memory\n' ;;
@@ -152,6 +169,7 @@ analysis_comm_subsystem() {
 # Maps a subsystem token to the human hypothesis label used in the distribution.
 analysis_subsystem_label() {
     case "$1" in
+        CPU) printf 'CPU saturation\n' ;;
         Filesystem) printf 'Filesystem wait\n' ;;
         Disk) printf 'Disk / block layer\n' ;;
         MariaDB) printf 'MariaDB bottleneck\n' ;;
@@ -165,6 +183,39 @@ analysis_subsystem_label() {
         Kernel) printf 'Kernel lock contention\n' ;;
         *) printf '\n' ;;
     esac
+}
+
+# --- measured offender tables ------------------------------------------------
+
+# Reads the top row of the aggregated CPU or I/O offender ranking for an incident
+# and prints "comm<TAB>value<TAB>pid", or nothing when no ranking exists. This is
+# the measured counterpart to the process-name pattern matching above: it reports
+# what a process actually consumed, not that it was running.
+analysis_top_measured() {
+    local dir="$1"
+    local kind="$2"
+    local top
+
+    # lib/ioforensics.sh is sourced alongside this file by the panic path and the
+    # CLI, but analysis.sh must stay usable on its own, so the dependency is
+    # checked rather than assumed.
+    case "$kind" in
+        cpu)
+            declare -F io_aggregate_cpu >/dev/null 2>&1 || return 0
+            top="$(io_aggregate_cpu "$dir" 2>/dev/null | head -n 1)"
+            ;;
+        *)
+            declare -F io_aggregate_offenders >/dev/null 2>&1 || return 0
+            top="$(io_aggregate_offenders "$dir" 2>/dev/null | head -n 1)"
+            ;;
+    esac
+
+    [[ -n "$top" ]] || return 0
+
+    local pid comm total
+    IFS=$'\t' read -r pid comm _ _ total _ _ _ <<<"$top"
+    [[ -n "$comm" && "$comm" != "?" ]] || return 0
+    printf '%s\t%s\t%s\n' "$comm" "$total" "$pid"
 }
 
 # --- window statistics -------------------------------------------------------
@@ -249,6 +300,7 @@ analysis_window_stats() {
 # scored/gated separately from the specific-cause hypotheses.
 SF_HYPOTHESES=(
     "Blocked (uninterruptible) tasks"
+    "CPU saturation"
     "Filesystem wait"
     "Disk / block layer"
     "MariaDB bottleneck"
@@ -260,6 +312,28 @@ SF_HYPOTHESES=(
     "Package manager"
     "Kernel lock contention"
 )
+
+# Hypotheses that can only ever be supported by *presence* of a named process
+# unless a measurement corroborates them. Presence is correlation: on a cPanel
+# box the Imunify360 daemons, gpg-agent and friends are resident 24/7, so their
+# appearance in the process table carries no information about any specific
+# incident. These are capped below SF_INCONCLUSIVE_FLOOR until a measured
+# offender table shows the same process actually consuming CPU or I/O.
+SF_PRESENCE_HYPOTHESES=(
+    "Maintenance interaction"
+    "Package manager"
+)
+
+# A specific cause must clear this to be named at all.
+SF_INCONCLUSIVE_FLOOR=15
+
+sf_is_presence_hypothesis() {
+    local h
+    for h in "${SF_PRESENCE_HYPOTHESES[@]}"; do
+        [[ "$h" == "$1" ]] && return 0
+    done
+    return 1
+}
 
 # The mechanism hypothesis, referenced by name in several places. Kept in a
 # variable so array subscripts never contain a literal '(' (which the formatter's
@@ -307,6 +381,7 @@ analysis_classify() {
     # floor instead of reading as a real possibility.
     local -A prior=(
         ["Blocked (uninterruptible) tasks"]=10
+        ["CPU saturation"]=4
         ["Filesystem wait"]=8
         ["Disk / block layer"]=6
         ["MariaDB bottleneck"]=3
@@ -336,6 +411,50 @@ analysis_classify() {
         low_cpu=1
         sf_add "Blocked (uninterruptible) tasks" 25
         SF_EVIDENCE+=("CPU only ${cpu_show}% at load ${W_MAX_LOAD} — blocking, not compute")
+    fi
+
+    # --- compute-bound: the mirror image of the above -------------------------
+    # Without this the engine cannot express "the box was simply busy", and a
+    # CPU-bound spike falls through to whatever noise-floor hypothesis is left.
+    SF_CPU_BOUND=0
+    if [[ "$cpu_show" != "NA" && -n "$cpu_show" ]]; then
+        if num_gt "$cpu_show" 70; then
+            SF_CPU_BOUND=1
+            sf_add "CPU saturation" 40
+            SF_EVIDENCE+=("CPU ${cpu_show}% at load ${W_MAX_LOAD} — compute-bound, not blocking")
+        elif num_gt "$cpu_show" 50; then
+            SF_CPU_BOUND=1
+            sf_add "CPU saturation" 25
+            SF_EVIDENCE+=("CPU ${cpu_show}% at load ${W_MAX_LOAD} — substantially compute-bound")
+        fi
+    fi
+
+    # A single process holding a core is the strongest CPU evidence there is, and
+    # unlike a process name it is a measurement.
+    SF_TOP_CPU_COMM=""
+    SF_TOP_CPU_PCT=0
+    SF_TOP_CPU_PID=""
+    local cpu_row
+    cpu_row="$(analysis_top_measured "$dir" cpu)"
+    if [[ -n "$cpu_row" ]]; then
+        IFS=$'\t' read -r SF_TOP_CPU_COMM SF_TOP_CPU_PCT SF_TOP_CPU_PID <<<"$cpu_row"
+        SF_EVIDENCE+=("top CPU process '${SF_TOP_CPU_COMM}' (pid ${SF_TOP_CPU_PID}) at ${SF_TOP_CPU_PCT}% CPU")
+        if num_gt "${SF_TOP_CPU_PCT:-0}" 80; then
+            sf_add "CPU saturation" 30
+        elif num_gt "${SF_TOP_CPU_PCT:-0}" 40; then
+            sf_add "CPU saturation" 15
+        fi
+    fi
+
+    # The measured I/O leader, used the same way.
+    SF_TOP_IO_COMM=""
+    SF_TOP_IO_KBS=0
+    SF_TOP_IO_PID=""
+    local io_row
+    io_row="$(analysis_top_measured "$dir" io)"
+    if [[ -n "$io_row" ]]; then
+        IFS=$'\t' read -r SF_TOP_IO_COMM SF_TOP_IO_KBS SF_TOP_IO_PID <<<"$io_row"
+        SF_EVIDENCE+=("top I/O process '${SF_TOP_IO_COMM}' (pid ${SF_TOP_IO_PID}) at ${SF_TOP_IO_KBS} kB/s")
     fi
 
     # --- where is the block? wait channel is the strongest signal -------------
@@ -394,10 +513,11 @@ analysis_classify() {
     # Present-but-not-proven: running maintenance is correlation, not causation,
     # so it earns only modest points. This is the exact weakness this rewrite is
     # meant to fix ("Imunify running -> Maintenance" is not sufficient evidence).
-    local maint maint_list="" maint_pts=0
+    local maint maint_list=""
     SF_IMUNIFY=0
     SF_PKGMGR=0
     SF_BACKUP=0
+    SF_MAINT_CORROBORATED=0
     while IFS= read -r maint; do
         [[ -n "$maint" ]] || continue
         maint_list+="${maint} "
@@ -406,25 +526,34 @@ analysis_classify() {
         esac
         sub="$(analysis_comm_subsystem "$maint")"
         case "$sub" in
-            Backup)
-                SF_BACKUP=1
-                ((maint_pts < 20)) && {
-                    sf_add "Maintenance interaction" 15
-                    maint_pts=$((maint_pts + 15))
-                }
-                ;;
-            Maintenance) ((maint_pts < 20)) && {
-                sf_add "Maintenance interaction" 12
-                maint_pts=$((maint_pts + 12))
-            } ;;
-            'Package manager')
-                SF_PKGMGR=1
-                sf_add "Package manager" 15
-                ;;
+            Backup) SF_BACKUP=1 ;;
+            'Package manager') SF_PKGMGR=1 ;;
         esac
+
+        # Presence alone scores almost nothing. It becomes real evidence only if
+        # the SAME process shows up in a measured offender table — i.e. it was
+        # actually burning CPU or moving bytes during the window.
+        if analysis_comm_matches "$maint" "$SF_TOP_CPU_COMM" \
+            || analysis_comm_matches "$maint" "$SF_TOP_IO_COMM"; then
+            SF_MAINT_CORROBORATED=1
+            case "$sub" in
+                Backup | Maintenance) sf_add "Maintenance interaction" 35 ;;
+                'Package manager') sf_add "Package manager" 35 ;;
+            esac
+            SF_EVIDENCE+=("maintenance process '${maint}' is ALSO the measured top consumer — corroborated")
+        else
+            case "$sub" in
+                Backup | Maintenance) sf_add "Maintenance interaction" 2 ;;
+                'Package manager') sf_add "Package manager" 2 ;;
+            esac
+        fi
     done < <(analysis_maintenance "$dir")
     if [[ -n "$maint_list" ]]; then
-        SF_EVIDENCE+=("maintenance/package/backup processes present: ${maint_list% } (running != responsible)")
+        if [[ "$SF_MAINT_CORROBORATED" -eq 1 ]]; then
+            SF_EVIDENCE+=("maintenance/package/backup processes present: ${maint_list% }")
+        else
+            SF_EVIDENCE+=("maintenance/package/backup processes present but NONE consumed measurable CPU or I/O: ${maint_list% } (presence is not evidence)")
+        fi
     fi
 
     # --- IO wait corroborates storage-bound causes ----------------------------
@@ -492,13 +621,25 @@ analysis_classify() {
         SF_CAP_SPECIFIC=65
     fi
 
+    # CPU saturation is measured directly from cpu_busy_pct and the per-process
+    # CPU ranking, so it does not depend on the kernel signals that gate the
+    # storage-side hypotheses and is not capped by their absence.
     local cap pct
     for h in "${SF_HYPOTHESES[@]}"; do
-        case "$h" in
-            "Blocked (uninterruptible) tasks") cap=90 ;;
-            "Maintenance interaction" | "Package manager") cap=60 ;;
-            *) cap="$SF_CAP_SPECIFIC" ;;
-        esac
+        if [[ "$h" == "$SF_MECH" || "$h" == "CPU saturation" ]]; then
+            cap=90
+        elif sf_is_presence_hypothesis "$h"; then
+            # Uncorroborated presence can never clear the floor, so it can never
+            # be named as the cause. Corroboration by a measured offender table
+            # lifts the cap.
+            if [[ "${SF_MAINT_CORROBORATED:-0}" -eq 1 ]]; then
+                cap=60
+            else
+                cap="$SF_INCONCLUSIVE_FLOOR"
+            fi
+        else
+            cap="$SF_CAP_SPECIFIC"
+        fi
         pct="${SF_SCORE[$h]:-0}"
         ((pct > cap)) && pct="$cap"
         ((pct < 1)) && pct=1
@@ -516,7 +657,7 @@ analysis_classify() {
             SF_LEADER="$h"
         fi
     done
-    if [[ -z "$SF_LEADER" || "$SF_LEADER_PCT" -le 15 ]]; then
+    if [[ -z "$SF_LEADER" || "$SF_LEADER_PCT" -le "$SF_INCONCLUSIVE_FLOOR" ]]; then
         SF_LEADER="Inconclusive (insufficient evidence)"
         SF_LEADER_PCT="${SF_PCT[$SF_MECH]}"
     fi
@@ -541,44 +682,94 @@ analysis_ledger() {
     local dir="$1"
     local leader="$SF_LEADER"
 
-    printf 'Evidence ledger (%s):\n' "$leader"
-    printf '  Supported by:\n'
-    local any=0
-    if num_gt "${W_MAX_DSTATE:-0}" 0; then
-        sf_check "high D-state (${W_MAX_DSTATE})"
-        any=1
-    fi
     local cpu_show="$W_CPU_AT_PEAK"
     [[ "$cpu_show" == "NA" || -z "$cpu_show" ]] && cpu_show="$W_MIN_CPU"
-    if [[ "$cpu_show" != "NA" && -n "$cpu_show" ]] && num_lt "$cpu_show" 30; then
-        sf_check "low CPU (${cpu_show}%) beside high load (${W_MAX_LOAD})"
-        any=1
-    fi
-    if num_gt "${W_MAX_IOWAIT:-0}" 20; then
-        sf_check "high IO wait (${W_MAX_IOWAIT}%)"
-        any=1
-    fi
-    if [[ "$SF_PSI_PRESENT" -eq 1 ]] && num_gt "$(incident_meta_get "$dir" peak_psi_io_full 0)" 20; then
-        sf_check "PSI io full avg10 high"
-        any=1
-    fi
-    if [[ "$SF_PSI_PRESENT" -eq 1 ]] && num_gt "$(incident_meta_get "$dir" peak_psi_mem_full 0)" 10; then
-        sf_check "PSI memory full avg10 high"
-        any=1
-    fi
+
+    printf 'Evidence ledger (%s):\n' "$leader"
+
+    # Only evidence that actually argues FOR the leader belongs here. Listing
+    # exclusions as support is how "no Apache pressure" ended up presented as a
+    # reason to believe a maintenance interaction.
+    printf '  Supported by:\n'
+    local any=0
+    case "$leader" in
+        "CPU saturation")
+            if [[ "$cpu_show" != "NA" && -n "$cpu_show" ]] && num_gt "$cpu_show" 50; then
+                sf_check "CPU ${cpu_show}% at load ${W_MAX_LOAD} (measured)"
+                any=1
+            fi
+            if [[ -n "${SF_TOP_CPU_COMM:-}" ]]; then
+                sf_check "top CPU process '${SF_TOP_CPU_COMM}' (pid ${SF_TOP_CPU_PID}) at ${SF_TOP_CPU_PCT}%"
+                any=1
+            fi
+            ;;
+        "Filesystem wait" | "Disk / block layer")
+            if num_gt "${W_MAX_IOWAIT:-0}" 20; then
+                sf_check "high IO wait (${W_MAX_IOWAIT}%)"
+                any=1
+            fi
+            if num_gt "${W_MAX_DSTATE:-0}" 0; then
+                sf_check "high D-state (${W_MAX_DSTATE})"
+                any=1
+            fi
+            if [[ "$SF_PSI_PRESENT" -eq 1 ]] && num_gt "$(incident_meta_get "$dir" peak_psi_io_full 0)" 20; then
+                sf_check "PSI io full avg10 high"
+                any=1
+            fi
+            if [[ -n "${SF_TOP_IO_COMM:-}" ]]; then
+                sf_check "top I/O process '${SF_TOP_IO_COMM}' at ${SF_TOP_IO_KBS} kB/s"
+                any=1
+            fi
+            if [[ "$SF_WCHAN_PRESENT" -eq 1 ]]; then
+                sf_check "wait channel captured"
+                any=1
+            fi
+            ;;
+        "Memory exhaustion")
+            if [[ "$SF_PSI_PRESENT" -eq 1 ]] && num_gt "$(incident_meta_get "$dir" peak_psi_mem_full 0)" 10; then
+                sf_check "PSI memory full avg10 high"
+                any=1
+            fi
+            ;;
+        "Maintenance interaction" | "Package manager")
+            if [[ "${SF_MAINT_CORROBORATED:-0}" -eq 1 ]]; then
+                sf_check "a maintenance process is the measured top consumer"
+                any=1
+            fi
+            ;;
+        *)
+            if num_gt "${W_MAX_DSTATE:-0}" 0; then
+                sf_check "high D-state (${W_MAX_DSTATE})"
+                any=1
+            fi
+            if [[ "$SF_WCHAN_PRESENT" -eq 1 ]]; then
+                sf_check "wait channel captured"
+                any=1
+            fi
+            ;;
+    esac
+    [[ "$any" -eq 1 ]] || printf '    (only weak/prior signals)\n'
+
+    # Exclusions narrow the field but are not support for whatever is left.
+    printf '  Alternatives ruled out (not support for %s):\n' "$leader"
+    local ruled=0
     if [[ "$W_MIN_APACHE" != "NA" && -n "$W_MIN_APACHE" ]] && num_lt "$W_MIN_APACHE" 50; then
-        sf_check "no Apache pressure (${W_MIN_APACHE} workers)"
-        any=1
+        sf_cross "Apache overload — only ${W_MIN_APACHE} workers"
+        ruled=1
     fi
     if [[ "$W_MIN_DBTHR" != "NA" && -n "$W_MIN_DBTHR" ]] && num_lt "$W_MIN_DBTHR" 4; then
-        sf_check "no MariaDB pressure (${W_MIN_DBTHR} threads)"
-        any=1
+        sf_cross "MariaDB bottleneck — only ${W_MIN_DBTHR} threads running"
+        ruled=1
     fi
-    if [[ "$SF_WCHAN_PRESENT" -eq 1 ]]; then
-        sf_check "wait channel captured"
-        any=1
+    if num_lt "${W_MAX_IOWAIT:-0}" 5 && [[ "$leader" != "CPU saturation" ]]; then
+        sf_cross "storage stall — IO wait only ${W_MAX_IOWAIT}%"
+        ruled=1
     fi
-    [[ "$any" -eq 1 ]] || printf '    (only weak/prior signals)\n'
+    if [[ "${W_MAX_DSTATE:-0}" == "0" ]]; then
+        sf_cross "uninterruptible blocking — no D-state tasks seen"
+        ruled=1
+    fi
+    [[ "$ruled" -eq 1 ]] || printf '    (none)\n'
 
     printf '  Missing evidence:\n'
     local missing=()
@@ -622,6 +813,20 @@ analysis_verdict_tiers() {
     [[ "$cpu_show" == "NA" || -z "$cpu_show" ]] && cpu_show="$W_MIN_CPU"
     if [[ "$cpu_show" != "NA" && -n "$cpu_show" ]] && num_lt "$cpu_show" 30 && num_gt "${W_MAX_LOAD:-0}" 5; then
         printf '  - Not CPU-bound: CPU %s%% at load %s (measured).\n' "$cpu_show" "$W_MAX_LOAD"
+        proven=1
+    fi
+    if [[ "$cpu_show" != "NA" && -n "$cpu_show" ]] && num_gt "$cpu_show" 50; then
+        printf '  - CPU-bound: CPU %s%% at load %s (measured).\n' "$cpu_show" "$W_MAX_LOAD"
+        proven=1
+    fi
+    if [[ -n "${SF_TOP_CPU_COMM:-}" ]] && num_gt "${SF_TOP_CPU_PCT:-0}" 40; then
+        printf "  - Largest CPU consumer was '%s' (pid %s) at %s%% (per-process measurement).\\n" \
+            "$SF_TOP_CPU_COMM" "$SF_TOP_CPU_PID" "$SF_TOP_CPU_PCT"
+        proven=1
+    fi
+    if [[ -n "${SF_TOP_IO_COMM:-}" ]] && num_gt "${SF_TOP_IO_KBS:-0}" 0; then
+        printf "  - Largest disk consumer was '%s' (pid %s) at %s kB/s (per-process measurement).\\n" \
+            "$SF_TOP_IO_COMM" "$SF_TOP_IO_PID" "$SF_TOP_IO_KBS"
         proven=1
     fi
     if [[ "$SF_PSI_PRESENT" -eq 1 ]] && num_gt "${psi_io:-0}" 20; then
@@ -767,6 +972,10 @@ analysis_write_facts() {
         printf 'imunify_active=%s\n' "${SF_IMUNIFY:-0}"
         printf 'pkgmgr_active=%s\n' "${SF_PKGMGR:-0}"
         printf 'backup_active=%s\n' "${SF_BACKUP:-0}"
+        printf 'maint_corroborated=%s\n' "${SF_MAINT_CORROBORATED:-0}"
+        printf 'cpu_bound=%s\n' "${SF_CPU_BOUND:-0}"
+        printf 'top_cpu_comm=%s\n' "${SF_TOP_CPU_COMM:-none}"
+        printf 'top_io_comm=%s\n' "${SF_TOP_IO_COMM:-none}"
         printf 'wchan_present=%s\n' "${SF_WCHAN_PRESENT:-0}"
         printf 'stack_present=%s\n' "${SF_STACK_PRESENT:-0}"
         printf 'leader=%s\n' "$SF_LEADER"
@@ -804,6 +1013,9 @@ analysis_correlate() {
         /^pkgmgr_active=1/  { pkg++ }
         /^backup_active=1/  { backup++ }
         /^wchan_present=1/  { wchan++ }
+        /^cpu_bound=1/      { cpubound++ }
+        /^top_cpu_comm=/    { c = $0; sub(/^top_cpu_comm=/, "", c); if (c != "none" && c != "") topcpu[c]++ }
+        /^top_io_comm=/     { c = $0; sub(/^top_io_comm=/, "", c); if (c != "none" && c != "") topio[c]++ }
         /^leader=/          { l = $0; sub(/^leader=/, "", l); lead[l]++ }
         END {
             printf "  Apache idle .................. %d/%d\n", apache+0, total
@@ -816,15 +1028,40 @@ analysis_correlate() {
             printf "  Package manager active ....... %d/%d\n", pkg+0, total
             printf "  Backup active ................ %d/%d\n", backup+0, total
             printf "  Wait channel captured ........ %d/%d\n", wchan+0, total
+            printf "  CPU-bound .................... %d/%d\n", cpubound+0, total
             printf "  Leading cause by incident:\n"
             for (k in lead) printf "    %-32s %d/%d\n", k, lead[k], total
+            if (length(topcpu) > 0) {
+                printf "  Recurring top CPU process:\n"
+                for (k in topcpu) printf "    %-32s %d/%d\n", k, topcpu[k], total
+            }
+            if (length(topio) > 0) {
+                printf "  Recurring top I/O process:\n"
+                for (k in topio) printf "    %-32s %d/%d\n", k, topio[k], total
+            }
         }
     ' "${facts[@]}"
+
+    # State the denominator honestly: incidents recorded before this feature (or
+    # closed by an older build) have no .facts and are silently absent above.
+    local all skipped
+    all="$(find "$base" -mindepth 1 -maxdepth 1 -type d -name 'incident-*' 2>/dev/null | wc -l | tr -d '[:space:]')"
+    skipped=$((all - total))
+    if [[ "$skipped" -gt 0 ]]; then
+        printf '  (compared across %s of %s recorded incidents; %s predate this analysis and carry no .facts)\n' \
+            "$total" "$all" "$skipped"
+    fi
 }
 
 # Recommended next investigation steps, keyed to the leading subsystem.
 analysis_next_steps() {
     case "$1" in
+        "CPU saturation")
+            printf 'Identify the top CPU process from the CPU offender table (--offenders)\n'
+            printf 'Check its age and command line: a long-lived 100%% process is usually stuck\n'
+            printf 'Decide whether it is legitimate work, a runaway loop, or an orphaned session\n'
+            printf 'If legitimate but disruptive, nice/cpulimit it or move it off this host\n'
+            ;;
         "Filesystem wait")
             printf 'Check dmesg for filesystem/journal errors (ext4/jbd2/xfs)\n'
             printf 'Run iostat -x 1: inspect %%util and await on the busy device\n'
@@ -912,6 +1149,14 @@ analysis_generate() {
         printf '  - Peak D-state processes: %s\n' "$W_MAX_DSTATE"
         printf '  - Lowest Apache workers: %s\n' "$W_MIN_APACHE"
         printf '  - Lowest MariaDB threads running: %s\n' "$W_MIN_DBTHR"
+        printf '  - Top CPU process: %s (pid %s) at %s%%\n' \
+            "$(incident_meta_get "$dir" peak_cpu_comm none)" \
+            "$(incident_meta_get "$dir" peak_cpu_pid none)" \
+            "$(incident_meta_get "$dir" peak_cpu_pct 0)"
+        printf '  - Top I/O process: %s (pid %s) at %s kB/s\n' \
+            "$(incident_meta_get "$dir" peak_io_comm none)" \
+            "$(incident_meta_get "$dir" peak_io_pid none)" \
+            "$(incident_meta_get "$dir" peak_io_kbs 0)"
         if [[ "$SF_PSI_PRESENT" -eq 1 ]]; then
             printf '  - PSI io full avg10 (peak): %s\n' "$(incident_meta_get "$dir" peak_psi_io_full 0)"
             printf '  - PSI cpu some avg10 (peak): %s\n' "$(incident_meta_get "$dir" peak_psi_cpu_some 0)"

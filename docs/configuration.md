@@ -94,13 +94,20 @@ PANIC_IO_MIN_OFFENDERS=3
 PANIC_IO_MAX_OFFENDERS=10
 PANIC_IO_TABLE_ROWS=20
 PANIC_IO_MAX_LINES=20000
+PANIC_IO_MAX_TRACKED_PIDS=5000
 PANIC_IO_LSOF_LINES=60
 PANIC_IO_DETAIL_TIMEOUT=5
 ```
 
-The metrics above establish *that* the server is storage-stalled. This
-establishes *which process moved the bytes* — the only question that follows
-from a yes, and the one a list of installed services cannot answer.
+The metrics above establish *that* the server is under pressure. This
+establishes **which process caused it** — the only question that follows, and
+the one a list of installed services cannot answer.
+
+Two rankings are produced per snapshot: `offenders-N.tsv` by disk read+write and
+`cpuoffenders-N.tsv` by CPU. A spike is either compute-bound or blocked, so both
+dimensions are needed for the culprit to be nameable in either case. Presence of
+a process in the table is a measurement; presence of a process in `ps` is not,
+and the analysis engine treats them very differently — see `docs/decisions.md`.
 
 - `ENABLE_IO_FORENSICS`: Capture per-process I/O attribution during each panic
   snapshot into `io-N.log`, plus a machine-readable `offenders-N.tsv`. Requires
@@ -119,6 +126,8 @@ from a yes, and the one a list of installed services cannot answer.
 - `PANIC_IO_MAX_LINES`: Hard cap on lines retained from each sampler. On a box
   with thousands of processes the raw sampler output is unbounded, and the
   recorder must not be able to fill the disk it is already stalled on.
+- `PANIC_IO_MAX_TRACKED_PIDS`: Upper bound on distinct PIDs the ranking keeps in
+  memory, so a fork storm cannot grow the ranking arrays without limit.
 - `PANIC_IO_LSOF_LINES`, `PANIC_IO_DETAIL_TIMEOUT`: Bounds on the per-offender
   reads. `lsof` is run with `-b -w` and under `timeout`, because a descriptor
   pointing at a stalled mount must never hang the recorder during the outage it

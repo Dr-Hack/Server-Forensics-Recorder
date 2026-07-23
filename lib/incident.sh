@@ -101,6 +101,11 @@ incident_start() {
     incident_meta_set "$dir" peak_io_kbs 0
     incident_meta_set "$dir" peak_io_pid none
     incident_meta_set "$dir" peak_io_comm none
+    # The same, for CPU. A spike is either compute-bound or blocked; both
+    # dimensions are retained so the culprit is nameable in either case.
+    incident_meta_set "$dir" peak_cpu_pct 0
+    incident_meta_set "$dir" peak_cpu_pid none
+    incident_meta_set "$dir" peak_cpu_comm none
 
     {
         printf 'Incident ID: %s\n' "$id"
@@ -210,6 +215,10 @@ incident_close() {
             "$(incident_meta_get "$dir" peak_io_comm none)" \
             "$(incident_meta_get "$dir" peak_io_pid none)" \
             "$(incident_meta_get "$dir" peak_io_kbs 0)"
+        printf 'Top CPU Process: %s (pid %s) at %s%% CPU\n' \
+            "$(incident_meta_get "$dir" peak_cpu_comm none)" \
+            "$(incident_meta_get "$dir" peak_cpu_pid none)" \
+            "$(incident_meta_get "$dir" peak_cpu_pct 0)"
         printf '\nFinal lightweight metrics:\n%s\n' "$final_metric_line"
     } >"${dir}/summary.txt"
 

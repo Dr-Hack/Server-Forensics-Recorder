@@ -44,8 +44,8 @@ Commands:
   --incidents       List recorded incidents, newest first, with trigger reason.
   --last-incident   Print the summary of the most recent incident.
   --last-analysis   Print the auto-generated root-cause analysis of the latest incident.
-  --offenders [ID]  Print the offending-processes table (ranked by disk read+write)
-                    for incident ID, or the latest incident when ID is omitted.
+  --offenders [ID]  Print the offending-processes tables (ranked by CPU and by
+                    disk read+write) for incident ID, or the latest incident.
   --io [ID]         Print the full I/O attribution capture (pidstat, iostat, PSI,
                     diskstats, mounts, per-offender /proc detail) for an incident.
   --test-panic      Create and close a safe test incident without expensive diagnostics.
@@ -370,23 +370,36 @@ cmd_offenders() {
     printf 'incident-dir=%s\n' "$dir"
     printf 'reason=%s\n\n' "$(incident_meta_get "$dir" reason unknown)"
 
+    local cputsv
     tsv="$(io_aggregate_offenders "$dir")"
-    if [[ -z "$tsv" ]]; then
-        printf 'No per-process I/O data captured for this incident.\n\n'
+    cputsv="$(io_aggregate_cpu "$dir")"
+
+    if [[ -z "$tsv" && -z "$cputsv" ]]; then
+        printf 'No per-process attribution data captured for this incident.\n\n'
         printf 'Likely causes:\n'
-        printf '  - the incident predates I/O attribution (no offenders-*.tsv present)\n'
+        printf '  - the incident predates resource attribution (no offenders-*.tsv present)\n'
         printf '  - sysstat is not installed (pidstat missing) — run --doctor\n'
         printf '  - ENABLE_IO_FORENSICS=0 in the config\n'
         return 0
     fi
 
-    printf '%s\n' "$tsv" | io_render_stream
+    # CPU first: most spikes on this box are compute-bound, and reading the CPU
+    # table first stops a quiet disk from looking like the whole story.
+    printf -- '-- Ranked by CPU --\n'
+    printf '%s\n' "$cputsv" | io_render_stream cpu
+    printf '\nPeak single-process CPU this incident: %s%% (pid %s, %s)\n\n' \
+        "$(incident_meta_get "$dir" peak_cpu_pct 0)" \
+        "$(incident_meta_get "$dir" peak_cpu_pid unknown)" \
+        "$(incident_meta_get "$dir" peak_cpu_comm unknown)"
 
+    printf -- '-- Ranked by disk read+write --\n'
+    printf '%s\n' "$tsv" | io_render_stream io
     printf '\nPeak single-process I/O this incident: %s kB/s (pid %s, %s)\n' \
         "$(incident_meta_get "$dir" peak_io_kbs 0)" \
         "$(incident_meta_get "$dir" peak_io_pid unknown)" \
         "$(incident_meta_get "$dir" peak_io_comm unknown)"
-    printf 'Full capture (cmdline, cwd, open files, /proc/PID/io): %s --io %s\n' \
+
+    printf '\nFull capture (cmdline, cwd, open files, /proc/PID/io): %s --io %s\n' \
         "$(basename "$0")" "$(basename "$dir")"
 }
 

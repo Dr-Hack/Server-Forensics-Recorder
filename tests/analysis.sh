@@ -17,6 +17,10 @@ source "${ROOT_DIR}/lib/utils.sh"
 source "${ROOT_DIR}/lib/incident.sh"
 # shellcheck source=../lib/analysis.sh
 source "${ROOT_DIR}/lib/analysis.sh"
+# The analysis engine reads the measured offender tables through these helpers,
+# so the real implementations are sourced rather than stubbed.
+# shellcheck source=../lib/ioforensics.sh
+source "${ROOT_DIR}/lib/ioforensics.sh"
 
 WORK="$(mktemp -d 2>/dev/null || mktemp -d -t sf-analysis)"
 trap 'rm -rf -- "$WORK"' EXIT
@@ -159,6 +163,125 @@ assert_not_contains "$B" "100%" "confidence never reaches 100% (no-evidence case
 # The .facts files should let correlation count both incidents.
 if [[ -f "${DIR_A}/.facts" && -f "${DIR_B}/.facts" ]]; then pass ".facts written for correlation"; else fail ".facts not written"; fi
 assert_contains "$B" "/2" "recurring patterns count across the two incidents"
+
+# --- CPU-bound incident ------------------------------------------------------
+# Reproduces production incident-20260723-192658: high load, high CPU, no I/O
+# wait, no D-state, and resident Imunify daemons in the process table. The old
+# engine had no CPU hypothesis, so the only thing that scored was daemon
+# presence and it reported "Maintenance interaction". See docs/decisions.md.
+printf 'test: CPU-bound incident (high CPU, no I/O wait, no D-state)\n'
+
+# A window with high CPU beside high load — the compute-bound signature.
+seed_cpu_window() {
+    local start="$1"
+    {
+        printf 'timestamp=2001-09-09T01:46:40+0000 epoch=%s load1=3.33 cpu_busy_pct=62.2 iowait_pct=0.1 dstate_processes=0 apache_workers=7 threads_running=1 mem_available_mb=3500\n' "$start"
+        printf 'timestamp=2001-09-09T01:46:50+0000 epoch=%s load1=12.46 cpu_busy_pct=80.6 iowait_pct=0.6 dstate_processes=0 apache_workers=7 threads_running=1 mem_available_mb=3457\n' "$((start + 60))"
+        printf 'timestamp=2001-09-09T01:47:00+0000 epoch=%s load1=8.75 cpu_busy_pct=60.3 iowait_pct=0.3 dstate_processes=0 apache_workers=7 threads_running=1 mem_available_mb=3457\n' "$((start + 90))"
+    } >>"$CURRENT_LOG"
+}
+
+DIR_C="${INCIDENT_DIR}/incident-C"
+mkdir -p "$DIR_C"
+incident_meta_set "$DIR_C" id incident-C
+incident_meta_set "$DIR_C" started iso-C
+incident_meta_set "$DIR_C" started_epoch 1000002000
+incident_meta_set "$DIR_C" ended_epoch 1000002120
+incident_meta_set "$DIR_C" reason "load1=12.46>10"
+incident_meta_set "$DIR_C" peak_load 12.46
+incident_meta_set "$DIR_C" peak_dstate 0
+incident_meta_set "$DIR_C" peak_iowait 0.6
+incident_meta_set "$DIR_C" peak_psi_io_full 0
+incident_meta_set "$DIR_C" peak_psi_cpu_some 0
+incident_meta_set "$DIR_C" peak_psi_mem_full 0
+
+# Resident maintenance daemons, exactly as production reports them.
+cat >"${DIR_C}/dstate-1.log" <<'EOF'
+===== maintenance/package processes (detected) =====
+  PID  PPID USER     STAT  ELAPSED COMMAND         ARGS
+ 1215     1 root     S      600000 imunify-residen /usr/sbin/imunify-resident
+ 1216     1 root     S      600000 imunify-agent-p /usr/sbin/imunify-agent
+EOF
+
+# The measured CPU ranking: `claude` is the actual consumer, and it is NOT one
+# of the maintenance daemons.
+printf '3323246\tclaude\t99.50\t0.00\t99.50\t1\t2\t71.0\n' >"${DIR_C}/cpuoffenders-1.tsv"
+printf '873022\tnetdata\t2.00\t1.00\t3.00\t0\t2\t2.1\n' >>"${DIR_C}/cpuoffenders-1.tsv"
+: >"${DIR_C}/offenders-1.tsv"
+
+seed_cpu_window 1000002000
+analysis_generate "$DIR_C" >/dev/null
+C="${DIR_C}/analysis.txt"
+
+if grep -q 'LIKELY CAUSE: CPU saturation' "$C"; then
+    pass "CPU-bound incident is named CPU saturation"
+else
+    fail "CPU-bound incident misclassified: $(grep -m1 'LIKELY CAUSE:' "$C")"
+fi
+assert_not_contains "$C" "LIKELY CAUSE: Maintenance interaction" "resident daemons no longer win by default"
+assert_contains "$C" "claude" "the measured CPU culprit is named"
+assert_contains "$C" "compute-bound" "compute-bound evidence is stated"
+assert_contains "$C" "presence is not evidence" "uncorroborated daemon presence is labelled as such"
+assert_contains "$C" "Alternatives ruled out" "ledger separates exclusions from support"
+
+# Exclusionary findings must not appear as support for the leader.
+support_block="$(sed -n '/Supported by:/,/Alternatives ruled out/p' "$C")"
+if printf '%s' "$support_block" | grep -q 'Apache'; then
+    fail "Apache exclusion still listed as support for the leader"
+else
+    pass "Apache exclusion is not listed as support"
+fi
+
+# Uncorroborated presence must never clear the floor.
+maint_pct="$(grep -oE 'Maintenance interaction \.+ +[0-9]+%' "$C" | grep -oE '[0-9]+%' | tr -d '%')"
+if [[ -n "$maint_pct" && "$maint_pct" -le 15 ]]; then
+    pass "uncorroborated maintenance capped at the inconclusive floor (${maint_pct}%)"
+else
+    fail "uncorroborated maintenance not capped (got '${maint_pct}')"
+fi
+
+# --- corroborated maintenance ------------------------------------------------
+# The mirror of the case above: gating presence behind measurement must not make
+# maintenance unnameable. When the maintenance process IS the measured top
+# consumer, the cap lifts and it can lead.
+printf 'test: maintenance corroborated by measurement\n'
+
+DIR_D="${INCIDENT_DIR}/incident-D"
+mkdir -p "$DIR_D"
+incident_meta_set "$DIR_D" id incident-D
+incident_meta_set "$DIR_D" started iso-D
+incident_meta_set "$DIR_D" started_epoch 1000003000
+incident_meta_set "$DIR_D" ended_epoch 1000003120
+incident_meta_set "$DIR_D" reason "load1=41.2>10"
+incident_meta_set "$DIR_D" peak_load 41.2
+incident_meta_set "$DIR_D" peak_dstate 14
+incident_meta_set "$DIR_D" peak_iowait 27.0
+incident_meta_set "$DIR_D" peak_psi_io_full 0
+incident_meta_set "$DIR_D" peak_psi_cpu_some 0
+incident_meta_set "$DIR_D" peak_psi_mem_full 0
+
+cat >"${DIR_D}/dstate-1.log" <<'EOF'
+===== maintenance/package processes (detected) =====
+  PID  PPID USER     STAT  ELAPSED COMMAND         ARGS
+ 4821     1 root     D         900 rsync           /usr/bin/rsync -a /home /backup
+EOF
+
+# rsync is both present AND the measured top disk consumer.
+printf '4821\trsync\t250.00\t20000.00\t20250.00\t455\t2\t98.0\n' >"${DIR_D}/offenders-1.tsv"
+: >"${DIR_D}/cpuoffenders-1.tsv"
+
+seed_window 1000003000
+analysis_generate "$DIR_D" >/dev/null
+D="${DIR_D}/analysis.txt"
+
+assert_contains "$D" "corroborated" "corroboration is stated explicitly"
+assert_contains "$D" "rsync" "the corroborating process is named"
+maint_pct_d="$(grep -oE 'Maintenance interaction \.+ +[0-9]+%' "$D" | grep -oE '[0-9]+%' | tr -d '%')"
+if [[ -n "$maint_pct_d" && "$maint_pct_d" -gt 15 ]]; then
+    pass "corroborated maintenance clears the floor (${maint_pct_d}%)"
+else
+    fail "corroborated maintenance still capped (got '${maint_pct_d}')"
+fi
 
 if [[ "$FAILURES" -gt 0 ]]; then
     printf 'analysis tests FAILED: %s\n' "$FAILURES" >&2

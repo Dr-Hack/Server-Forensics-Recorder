@@ -100,6 +100,58 @@ Linux 5.14.0-427.el9.x86_64 (server1)   07/23/2026      _x86_64_        (4 CPU)
 EOF
 }
 
+# VERBATIM output from the production server (sysstat 11.7.3, el8, 12-hour
+# locale), reduced in length only. The timestamp occupies TWO fields here
+# ("07:27:10 PM"), shifting every column right by one. A parser that assumed a
+# single-field epoch discarded every row and produced an empty offender table
+# with no error — see docs/decisions.md. The header also repeats between
+# samples, Command contains spaces ("lfd - sleeping"), and some intervals have
+# no rows at all.
+write_real_el8_pidstat_d() {
+    cat >"$1" <<'EOF'
+Linux 4.18.0-553.124.4.el8_10.x86_64 (server1.drhack.net)       07/23/2026      _x86_64_        (4 CPU)
+
+# Time        UID       PID   kB_rd/s   kB_wr/s kB_ccwr/s iodelay  Command
+07:27:10 PM     0       353      0.00     79.21      0.00       1  jbd2/vda2-8
+07:27:10 PM     0      1118      0.00      3.96      0.00       0  rsyslogd
+07:27:10 PM   965    873022     15.84      0.00      0.00       0  netdata
+07:27:10 PM     0   3455790    174.26      3.96      0.00       0  bash
+
+# Time        UID       PID   kB_rd/s   kB_wr/s kB_ccwr/s iodelay  Command
+
+# Time        UID       PID   kB_rd/s   kB_wr/s kB_ccwr/s iodelay  Command
+07:27:12 PM     0   3041620     16.00      0.00      0.00       0  lfd - sleeping
+
+# Time        UID       PID   kB_rd/s   kB_wr/s kB_ccwr/s iodelay  Command
+07:27:13 PM     0      1118      0.00      4.00      0.00       0  rsyslogd
+07:27:13 PM   965    873022    636.00      0.00      0.00       0  netdata
+EOF
+}
+
+# The matching `pidstat -u` output. Two `claude` processes at 100% CPU each are
+# the real cause of the 19:26 incident; the engine must be able to name them.
+# Note this layout has BOTH a "%CPU" column and a bare "CPU" column (the core
+# number), so the total must be resolved by exact name.
+write_real_el8_pidstat_u() {
+    cat >"$1" <<'EOF'
+Linux 4.18.0-553.124.4.el8_10.x86_64 (server1.drhack.net)       07/23/2026      _x86_64_        (4 CPU)
+
+# Time        UID       PID    %usr %system  %guest   %wait    %CPU   CPU  Command
+07:27:10 PM     0        13    0.00    0.99    0.00    1.98    0.99     0  rcu_sched
+07:27:10 PM   984      1362    0.00    0.99    0.00    0.00    0.99     3  mariadbd
+07:27:10 PM   965    873022    1.98    0.00    0.00    0.00    1.98     3  netdata
+07:27:10 PM     0   3323246  100.00    0.00    0.00    0.00  100.00     2  claude
+07:27:10 PM     0   3347301  100.00    0.00    0.00    0.00  100.00     1  claude
+
+# Time        UID       PID    %usr %system  %guest   %wait    %CPU   CPU  Command
+07:27:11 PM     0         1    1.00    0.00    0.00    0.00    1.00     3  systemd
+07:27:11 PM     0      1215    0.00    1.00    0.00    0.00    1.00     1  imunify-residen
+07:27:11 PM   965    873022    2.00    2.00    0.00    0.00    4.00     3  netdata
+07:27:11 PM     0   3323246   99.00    0.00    0.00    1.00   99.00     2  claude
+07:27:11 PM     0   3347301   99.00    0.00    0.00    1.00   99.00     1  claude
+EOF
+}
+
 # --- ranking -----------------------------------------------------------------
 
 printf 'io ranking (modern sysstat layout)\n'
@@ -146,6 +198,44 @@ assert_eq "$a_pid" "4821" "attached-hash header resolves the PID column, not UID
 assert_eq "$a_comm" "rsync" "attached-hash header resolves the Command column"
 assert_eq "$a_wr" "18000.00" "attached-hash header resolves kB_wr/s"
 assert_eq "$a_tot" "18000.00" "attached-hash header totals correctly"
+
+printf 'io ranking (REAL el8 output, 12-hour clock)\n'
+write_real_el8_pidstat_d "${WORK}/el8d.txt"
+io_rank_offenders "${WORK}/el8d.txt" >"${WORK}/el8d.tsv"
+el8_rows="$(wc -l <"${WORK}/el8d.tsv" | tr -d '[:space:]')"
+if [[ "$el8_rows" -gt 0 ]]; then
+    pass "12-hour timestamp does not silently discard every row"
+else
+    fail "12-hour timestamp discarded every row (empty table, the production bug)"
+fi
+IFS=$'\t' read -r e_pid e_comm e_rd _ _ _ _ _ <<<"$(head -n 1 "${WORK}/el8d.tsv")"
+assert_eq "$e_pid" "873022" "AM/PM offset resolves PID, not UID"
+assert_eq "$e_comm" "netdata" "AM/PM offset resolves Command"
+assert_eq "$e_rd" "325.92" "read rate averaged over the PID's own samples"
+assert_contains "$(cat "${WORK}/el8d.tsv")" "lfd - sleeping" "Command containing spaces survives"
+assert_contains "$(cat "${WORK}/el8d.tsv")" "jbd2/vda2-8" "repeated headers do not break parsing"
+
+printf 'cpu ranking (REAL el8 output)\n'
+write_real_el8_pidstat_u "${WORK}/el8u.txt"
+io_rank_cpu "${WORK}/el8u.txt" >"${WORK}/el8u.tsv"
+IFS=$'\t' read -r c_pid c_comm c_usr _ c_tot _ _ _ <<<"$(head -n 1 "${WORK}/el8u.tsv")"
+assert_eq "$c_comm" "claude" "CPU ranking names the actual culprit"
+assert_eq "$c_tot" "99.50" "%CPU is read from the %CPU column, not summed"
+assert_eq "$c_usr" "99.50" "%usr resolved correctly beside a bare CPU column"
+if [[ "$c_pid" == "3323246" || "$c_pid" == "3347301" ]]; then
+    pass "CPU ranking reports one of the two saturating PIDs"
+else
+    fail "CPU ranking reported an unexpected PID: ${c_pid}"
+fi
+second_cpu="$(sed -n '2p' "${WORK}/el8u.tsv" | cut -f2)"
+assert_eq "$second_cpu" "claude" "both saturating processes are ranked above the noise"
+assert_contains "$(sed -n '3p' "${WORK}/el8u.tsv")" "netdata" "low-CPU processes rank below"
+
+cpu_table="$(io_render_table "${WORK}/el8u.tsv" cpu)"
+assert_contains "$cpu_table" "CPU_PCT" "CPU table uses CPU column labels"
+assert_contains "$cpu_table" "PCT_CPU" "CPU table reports share of CPU"
+io_table="$(io_render_table "${WORK}/el8d.tsv" io)"
+assert_contains "$io_table" "TOTAL_KBs" "I/O table keeps I/O column labels"
 
 # --- offender selection ------------------------------------------------------
 

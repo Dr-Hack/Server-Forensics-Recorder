@@ -202,8 +202,12 @@ capture_forensics() {
         "cat /etc/crontab 2>/dev/null; for d in /etc/cron.d /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly; do printf '\n== %s ==\n' \"\$d\"; ls -la \"\$d\" 2>/dev/null; done"
 
     # Maintenance / package / backup activity, detected from the process table.
+    # The exclusion list covers the recorder's own helpers: without it the tool
+    # detects its own `timeout`, `pidstat` and `iostat` invocations and then
+    # scores them as maintenance activity, which is how a previous build reported
+    # "Maintenance" as a cause partly on the strength of its own processes.
     run_diag_shell "$file" "maintenance/package processes (detected)" \
-        "ps -eo pid,ppid,user,stat,etimes,comm,args | awk 'NR==1 || (tolower(\$0) ~ /dnf|yum| rpm|packagekit|imunify|cagefs|clamscan|freshclam|updatedb|mlocate|pkgacct|cpbackup|jetbackup|backup|rsync| tar |mysqldump|xtrabackup|mariabackup|upcp|leapp|ea-nginx|quota/ && \$6 !~ /^(awk|ps|sh|bash)\$/)'"
+        "ps -eo pid,ppid,user,stat,etimes,comm,args | awk 'NR==1 || (tolower(\$0) ~ /dnf|yum| rpm|packagekit|imunify|cagefs|clamscan|freshclam|updatedb|mlocate|pkgacct|cpbackup|jetbackup|backup|rsync| tar |mysqldump|xtrabackup|mariabackup|upcp|leapp|ea-nginx|quota/ && \$6 !~ /^(awk|ps|sh|bash|timeout|pidstat|iostat|vmstat|lsof|find|sed|grep|head|sort|server-forensics)\$/ && \$0 !~ /server-forensics/)'"
 
     incident_meta_set "$dir" last_dstate_log "$file"
     log_warn "captured d-state forensics ${index}: ${file}"

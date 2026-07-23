@@ -2,7 +2,7 @@
 # Shared utility functions for server-forensics.
 # shellcheck disable=SC2034
 
-SERVER_FORENSICS_VERSION="0.1.0"
+SERVER_FORENSICS_VERSION="0.2.0"
 
 sf_root() {
     if [[ -n "${SF_ROOT:-}" ]]; then
@@ -89,6 +89,7 @@ load_config() {
     PANIC_IO_MAX_OFFENDERS="${PANIC_IO_MAX_OFFENDERS:-10}"
     PANIC_IO_TABLE_ROWS="${PANIC_IO_TABLE_ROWS:-20}"
     PANIC_IO_MAX_LINES="${PANIC_IO_MAX_LINES:-20000}"
+    PANIC_IO_MAX_TRACKED_PIDS="${PANIC_IO_MAX_TRACKED_PIDS:-5000}"
     PANIC_IO_LSOF_LINES="${PANIC_IO_LSOF_LINES:-60}"
     PANIC_IO_DETAIL_TIMEOUT="${PANIC_IO_DETAIL_TIMEOUT:-5}"
     ENABLE_PLUGINS="${ENABLE_PLUGINS:-1}"
@@ -193,6 +194,8 @@ validate_config() {
     [[ "$PANIC_IO_TABLE_ROWS" -ge 1 ]] || fail_config "PANIC_IO_TABLE_ROWS must be at least 1"
     is_uint "$PANIC_IO_MAX_LINES" || fail_config "PANIC_IO_MAX_LINES must be a non-negative integer"
     [[ "$PANIC_IO_MAX_LINES" -ge 100 ]] || fail_config "PANIC_IO_MAX_LINES must be at least 100"
+    is_uint "$PANIC_IO_MAX_TRACKED_PIDS" || fail_config "PANIC_IO_MAX_TRACKED_PIDS must be a non-negative integer"
+    [[ "$PANIC_IO_MAX_TRACKED_PIDS" -ge 10 ]] || fail_config "PANIC_IO_MAX_TRACKED_PIDS must be at least 10"
     is_uint "$PANIC_IO_LSOF_LINES" || fail_config "PANIC_IO_LSOF_LINES must be a non-negative integer"
     is_uint "$PANIC_IO_DETAIL_TIMEOUT" || fail_config "PANIC_IO_DETAIL_TIMEOUT must be a non-negative integer"
     [[ "$PANIC_IO_DETAIL_TIMEOUT" -ge 1 ]] || fail_config "PANIC_IO_DETAIL_TIMEOUT must be at least 1"
