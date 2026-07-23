@@ -359,7 +359,7 @@ resolve_incident() {
 # The answer to "which process was actually consuming I/O" — the incident-level
 # table, merged across every snapshot and ranked by peak observed throughput.
 cmd_offenders() {
-    local dir tsv rows
+    local dir tsv
     dir="$(resolve_incident "${1:-}")" || return 1
 
     if [[ -z "$dir" ]]; then
@@ -380,10 +380,7 @@ cmd_offenders() {
         return 0
     fi
 
-    rows="$(mktemp 2>/dev/null || printf '%s' "${dir}/.offenders.tmp")"
-    printf '%s\n' "$tsv" >"$rows"
-    io_render_table "$rows"
-    rm -f -- "$rows" 2>/dev/null || true
+    printf '%s\n' "$tsv" | io_render_stream
 
     printf '\nPeak single-process I/O this incident: %s kB/s (pid %s, %s)\n' \
         "$(incident_meta_get "$dir" peak_io_kbs 0)" \

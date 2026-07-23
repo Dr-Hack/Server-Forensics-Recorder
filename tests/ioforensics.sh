@@ -86,6 +86,20 @@ Linux 5.14.0-427.el9.x86_64 (server1)   07/23/2026      _x86_64_        (4 CPU)
 EOF
 }
 
+# sysstat builds that attach the comment marker to the first column ("#Time"
+# rather than "# Time"). Splitting the raw header makes this form disagree with
+# the data rows by one field, which resolves PID to the UID column and yields an
+# empty table with no error at all. Regression fixture for that failure.
+write_attached_hash_pidstat() {
+    cat >"$1" <<'EOF'
+Linux 5.14.0-427.el9.x86_64 (server1)   07/23/2026      _x86_64_        (4 CPU)
+
+#Time        UID       PID   kB_rd/s   kB_wr/s kB_ccwr/s iodelay  Command
+ 1784773100     0      4821      0.00  18000.00      0.00     412  rsync
+ 1784773100    27      1190    240.00    120.00      0.00      31  mariadbd
+EOF
+}
+
 # --- ranking -----------------------------------------------------------------
 
 printf 'io ranking (modern sysstat layout)\n'
@@ -121,6 +135,17 @@ assert_eq "$l_pid" "7777" "legacy layout resolves PID column"
 assert_eq "$l_comm" "clamscan" "legacy layout resolves Command column"
 assert_eq "$l_rd" "9000.00" "legacy layout resolves kB_rd/s despite missing iodelay"
 assert_eq "$l_tot" "9100.00" "legacy layout totals correctly"
+
+printf 'io ranking (attached-hash header, "#Time")\n'
+write_attached_hash_pidstat "${WORK}/attached.txt"
+io_rank_offenders "${WORK}/attached.txt" >"${WORK}/attached.tsv"
+attached_rows="$(wc -l <"${WORK}/attached.tsv" | tr -d '[:space:]')"
+assert_eq "$attached_rows" "2" "attached-hash header does not silently yield an empty table"
+IFS=$'\t' read -r a_pid a_comm _ a_wr a_tot _ _ _ <<<"$(head -n 1 "${WORK}/attached.tsv")"
+assert_eq "$a_pid" "4821" "attached-hash header resolves the PID column, not UID"
+assert_eq "$a_comm" "rsync" "attached-hash header resolves the Command column"
+assert_eq "$a_wr" "18000.00" "attached-hash header resolves kB_wr/s"
+assert_eq "$a_tot" "18000.00" "attached-hash header totals correctly"
 
 # --- offender selection ------------------------------------------------------
 
@@ -161,6 +186,41 @@ assert_contains "$table" "IODELAY" "table exposes block-I/O delay"
 empty_table="$(io_render_table "${WORK}/none.tsv")"
 assert_contains "$empty_table" "No per-process I/O recorded" "empty table explains itself"
 assert_contains "$empty_table" "sysstat" "empty table points at the likely cause"
+
+# The CLI renders from a pipe, never a scratch file, so a non-root caller
+# inspecting an incident cannot fail on a write it should never have attempted.
+stream_table="$(printf '%s\n' "$(cat "${WORK}/modern.tsv")" | io_render_stream)"
+assert_contains "$stream_table" "rsync" "stream rendering names the offending process"
+assert_contains "$stream_table" "PCT_IO" "stream rendering emits the header once"
+stream_header_count="$(printf '%s\n' "$stream_table" | grep -c 'PCT_IO')"
+assert_eq "$stream_header_count" "1" "stream rendering does not repeat the header"
+
+# --- concurrency ------------------------------------------------------------
+
+printf 'sampler concurrency\n'
+# A bare `wait` reaps every background job in the shell, including ones the
+# capture did not start, which would block the capture for as long as they run.
+# io_wait_jobs must wait only on its own samplers.
+sleep 6 &
+UNRELATED=$!
+SF_IO_JOBS=()
+PANIC_IO_MAX_LINES=100
+io_run_bg "${WORK}/bg1.txt" 5 true
+io_run_bg "${WORK}/bg2.txt" 5 true
+started="$SECONDS"
+io_wait_jobs
+elapsed=$((SECONDS - started))
+if [[ "$elapsed" -lt 3 ]]; then
+    pass "io_wait_jobs ignores unrelated background jobs (${elapsed}s)"
+else
+    fail "io_wait_jobs blocked on an unrelated job (${elapsed}s)"
+fi
+assert_eq "${#SF_IO_JOBS[@]}" "0" "job list is cleared after waiting"
+kill "$UNRELATED" 2>/dev/null || true
+wait "$UNRELATED" 2>/dev/null || true
+
+io_run_bg "${WORK}/missing.txt" 5 sf-definitely-not-a-real-command
+assert_contains "$(cat "${WORK}/missing.txt")" "command not found" "missing sampler is reported, not fatal"
 
 # --- incident peaks and aggregation ------------------------------------------
 

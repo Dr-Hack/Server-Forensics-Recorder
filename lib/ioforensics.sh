@@ -35,28 +35,53 @@ io_header() {
     } >>"$file"
 }
 
+# PIDs of the samplers started by io_run_bg, so io_wait_jobs can wait on exactly
+# those. A bare `wait` would also block on any unrelated background job in the
+# caller's shell, which would hang the capture for as long as that job runs.
+SF_IO_JOBS=()
+
 # Runs a command into its own file in the BACKGROUND. Used for the three
-# concurrent samplers. Never allowed to outlive the timeout.
+# concurrent samplers. Never allowed to outlive the timeout, and never allowed to
+# write more than PANIC_IO_MAX_LINES — a box with thousands of processes must not
+# be able to fill the disk it is already stalled on.
 io_run_bg() {
     local out="$1"
     local timeout_s="$2"
     shift 2
     local command_name="$1"
+    local max_lines="${PANIC_IO_MAX_LINES:-20000}"
 
     if ! command_exists "$command_name"; then
         printf 'SKIPPED: command not found: %s\n' "$command_name" >"$out"
         return 0
     fi
 
-    {
-        local rc=0
-        run_with_timeout "$timeout_s" "$@" >"$out" 2>&1 || rc=$?
+    (
+        # The producer is killed by SIGPIPE once head has taken its fill, which
+        # pipefail would otherwise report as a failure, so the pipeline status is
+        # inspected explicitly rather than trusted.
+        set +e
+        run_with_timeout "$timeout_s" "$@" 2>&1 | head -n "$max_lines" >"$out"
+        rc=${PIPESTATUS[0]}
         if [[ "$rc" -eq 124 ]]; then
             printf '\n[timed out after %ss]\n' "$timeout_s" >>"$out"
+        elif [[ "$rc" -eq 141 ]]; then
+            printf '\n[output capped at %s lines]\n' "$max_lines" >>"$out"
         elif [[ "$rc" -ne 0 ]]; then
             printf '\n[exited with status %s]\n' "$rc" >>"$out"
         fi
-    } &
+    ) &
+    SF_IO_JOBS+=("$!")
+}
+
+# Waits for exactly the samplers this capture started, then clears the list.
+io_wait_jobs() {
+    local job
+    for job in "${SF_IO_JOBS[@]:-}"; do
+        [[ -n "$job" ]] || continue
+        wait "$job" 2>/dev/null || true
+    done
+    SF_IO_JOBS=()
 }
 
 # Appends a captured temp file into the snapshot log under a section header.
@@ -102,8 +127,14 @@ io_run_now() {
 #
 # Column positions are resolved from pidstat's own header rather than hardcoded,
 # because the column set differs across sysstat versions (older builds have no
-# `iodelay`, some emit `kB_ccwr/s`). The header line begins with '#', which shifts
-# every header index one to the right of the matching data index.
+# `iodelay`, some emit `kB_ccwr/s`).
+#
+# The comment marker is stripped from the header BEFORE splitting, because
+# sysstat emits both "# Time ..." (marker as its own token) and "#Time ..."
+# (marker attached to the first column). Splitting the raw line makes those two
+# forms disagree by one field, which silently resolves PID to the UID column and
+# yields an empty offender table with no error — the worst possible failure for
+# this module. After stripping, header index maps 1:1 onto data field index.
 io_rank_offenders() {
     local pidstat_out="$1"
 
@@ -112,13 +143,15 @@ io_rank_offenders() {
     awk '
         # Resolve column layout from the pidstat header.
         /^#/ && /PID/ {
-            for (i = 2; i <= NF; i++) {
-                # data index = header index - 1 (the leading "#" token)
-                if ($i == "PID")       c_pid = i - 1
-                else if ($i == "kB_rd/s")  c_rd = i - 1
-                else if ($i == "kB_wr/s")  c_wr = i - 1
-                else if ($i == "iodelay")  c_del = i - 1
-                else if ($i == "Command")  c_cmd = i - 1
+            head = $0
+            sub(/^#[ \t]*/, "", head)
+            nh = split(head, hdr, /[ \t]+/)
+            for (i = 1; i <= nh; i++) {
+                if (hdr[i] == "PID")            c_pid = i
+                else if (hdr[i] == "kB_rd/s")   c_rd  = i
+                else if (hdr[i] == "kB_wr/s")   c_wr  = i
+                else if (hdr[i] == "iodelay")   c_del = i
+                else if (hdr[i] == "Command")   c_cmd = i
             }
             next
         }
@@ -157,7 +190,7 @@ io_rank_offenders() {
                     maxdel[p], n[p], pct
             }
         }
-    ' "$pidstat_out" | sort -t"$(printf '\t')" -k5 -rn
+    ' "$pidstat_out" | sort -t"$(printf '\t')" -k5,5 -rn
 }
 
 # Selects the PIDs worth a full detail block: everything above
@@ -252,25 +285,42 @@ io_offender_detail() {
 
 # --- offender table ----------------------------------------------------------
 
-# Renders the ranked TSV as the human-facing "offending processes" table.
-io_render_table() {
-    local tsv="$1"
+# Renders ranked TSV rows on STDIN as the human-facing "offending processes"
+# table. Stream-based so that read-only inspection commands never have to write a
+# scratch file — writing one into the incident directory would fail for a
+# non-root caller, and writing one at all is needless work during an outage.
+io_render_stream() {
     local limit="${PANIC_IO_TABLE_ROWS:-20}"
 
-    if [[ ! -s "$tsv" ]]; then
-        printf 'No per-process I/O recorded in this window.\n'
-        printf 'If pidstat is missing, install sysstat; kB_rd/s requires kernel I/O accounting.\n'
-        return 0
-    fi
-
-    printf '%-8s %-18s %10s %10s %10s %8s %7s  %s\n' \
-        PID COMMAND READ_KBs WRITE_KBs TOTAL_KBs IODELAY SAMPLES PCT_IO
-    printf '%s\n' '--------------------------------------------------------------------------------------------'
     awk -F'\t' -v lim="$limit" '
+        NR == 1 {
+            printf "%-8s %-18s %10s %10s %10s %8s %7s  %s\n", \
+                "PID", "COMMAND", "READ_KBs", "WRITE_KBs", "TOTAL_KBs", \
+                "IODELAY", "SAMPLES", "PCT_IO"
+            printf "%s\n", "--------------------------------------------------------------------------------------------"
+        }
         NR > lim { exit }
         { printf "%-8s %-18.18s %10.2f %10.2f %10.2f %8d %7d  %5.1f%%\n", \
             $1, $2, $3, $4, $5, $6, $7, $8 }
-    ' "$tsv"
+        END {
+            if (NR == 0) {
+                print "No per-process I/O recorded in this window."
+                print "If pidstat is missing, install sysstat; kB_rd/s also requires kernel I/O accounting."
+            }
+        }
+    '
+}
+
+# File-based wrapper, used by the capture path where the TSV is already on disk.
+io_render_table() {
+    local tsv="$1"
+
+    if [[ ! -s "$tsv" ]]; then
+        io_render_stream </dev/null
+        return 0
+    fi
+
+    io_render_stream <"$tsv"
 }
 
 # --- entry point -------------------------------------------------------------
@@ -292,6 +342,11 @@ capture_io_forensics() {
     # healthy run is never reported as a timeout.
     local window=$((samples * interval))
     local tmo=$((window + 10))
+
+    # Clear any work directory left by a previous run that was killed mid-capture,
+    # so a repeatedly-interrupted panic loop cannot accumulate them inside the
+    # incident (which rotate.sh would then archive verbatim).
+    rm -rf -- "${dir}/.io-${index}."* 2>/dev/null || true
 
     local work
     work="$(mktemp -d "${dir}/.io-${index}.XXXXXX" 2>/dev/null)" || work=""
@@ -335,7 +390,7 @@ capture_io_forensics() {
     io_run_now "$file" "findmnt" findmnt --real -o SOURCE,TARGET,FSTYPE,OPTIONS
     io_run_now "$file" "findmnt -D (usage)" findmnt -D -o SOURCE,TARGET,FSTYPE,SIZE,USED,AVAIL,USE%
 
-    wait
+    io_wait_jobs
 
     io_merge "$file" "pidstat -d -h ${interval} ${samples} (per-process I/O)" "${work}/pidstat-d"
     io_merge "$file" "pidstat -u -h ${interval} ${samples} (per-process CPU)" "${work}/pidstat-u"
@@ -423,5 +478,5 @@ io_aggregate_offenders() {
                     del[p], n[p], pct
             }
         }
-    ' "${files[@]}" | sort -t"$(printf '\t')" -k5 -rn
+    ' "${files[@]}" | sort -t"$(printf '\t')" -k5,5 -rn
 }

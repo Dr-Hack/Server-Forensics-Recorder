@@ -93,6 +93,7 @@ PANIC_IO_OFFENDER_PCT=5
 PANIC_IO_MIN_OFFENDERS=3
 PANIC_IO_MAX_OFFENDERS=10
 PANIC_IO_TABLE_ROWS=20
+PANIC_IO_MAX_LINES=20000
 PANIC_IO_LSOF_LINES=60
 PANIC_IO_DETAIL_TIMEOUT=5
 ```
@@ -115,6 +116,9 @@ from a yes, and the one a list of installed services cannot answer.
 - `PANIC_IO_MIN_OFFENDERS`, `PANIC_IO_MAX_OFFENDERS`: Always detail at least the
   top N processes so a diffuse incident still yields something, and never more
   than the maximum so a storm of writers cannot make the recorder fan out.
+- `PANIC_IO_MAX_LINES`: Hard cap on lines retained from each sampler. On a box
+  with thousands of processes the raw sampler output is unbounded, and the
+  recorder must not be able to fill the disk it is already stalled on.
 - `PANIC_IO_LSOF_LINES`, `PANIC_IO_DETAIL_TIMEOUT`: Bounds on the per-offender
   reads. `lsof` is run with `-b -w` and under `timeout`, because a descriptor
   pointing at a stalled mount must never hang the recorder during the outage it
