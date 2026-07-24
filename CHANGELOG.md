@@ -52,6 +52,23 @@ views are blind. This release attributes the load to the endpoint.
   Reads are bounded (`WEBLOG_MAX_LINES` tail per file) and timeout-wrapped
   (`WEBLOG_READ_TIMEOUT`); nothing here touches the network or a package manager.
 
+- **Self-request labelling.** The box's own addresses — discovered at runtime
+  from `hostname -I` / `ip addr`, never hardcoded — are labelled in the client-IP
+  table as loopback / self-requests (`wp-cron` and cPanel health pings), so the
+  operator's own IP is not mistaken for a client and a real attacker stands
+  alone. Confirmed against a live incident where the server's own IP was the #2
+  "client" purely from WordPress loopback.
+- **Per-vhost breakdown.** `--requests` now leads with a per-domain hit tally, so
+  on a multi-site account the targeted site is explicit rather than hidden inside
+  a combined total.
+
+### Fixed
+
+- `web_capture` used `exit` inside a brace group, which on the early-return paths
+  (no start epoch / no log directory / no log files) would have terminated the
+  whole recorder — aborting `panic.sh` before analysis at incident close. The
+  capture body now runs in a subshell so its exits are scoped to itself.
+
 ## 0.3.0 — 2026-07-24
 
 The recorder measured the right things but arrived after the event, and ranked

@@ -212,10 +212,16 @@ WEBLOG_ABUSE_ENDPOINTS="xmlrpc.php wp-login.php admin-ajax.php admin-post.php wp
 
 The endpoint names the script; the access log names the URL and the client IP.
 At incident close the recorder reads a bounded tail of the domain access logs,
-filters to the incident window, and writes `web.txt`: top request paths, top
-client IPs, abuse-endpoint tallies, and top user agents. View it with
-`server-forensics --requests [ID]`, which regenerates on demand so it also works
-mid-incident.
+filters to the incident window, and writes `web.txt`: a per-vhost hit tally, top
+request paths, top client IPs, abuse-endpoint tallies, and top user agents. View
+it with `server-forensics --requests [ID]`, which regenerates on demand so it
+also works mid-incident.
+
+The client-IP table labels the **server's own addresses** — discovered at
+runtime from `hostname -I` / `ip addr`, never hardcoded — as loopback /
+self-requests (`wp-cron`, cPanel health pings), so a self-request row is not read
+as a client. The **per-vhost tally** attributes hits per domain, so on a
+multi-site account the targeted site is explicit.
 
 - `WEBLOG_DIRS`: Space-separated search path; empty uses the cPanel defaults
   (`/etc/apache2/logs/domlogs`, `/usr/local/apache/domlogs`,

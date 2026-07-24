@@ -132,6 +132,40 @@ MAL="$(printf 'garbage line with no brackets or quotes\n[not a real log]\n' \
     | web_filter_window 20260725001400 20260725002000 || printf 'ERRORED')"
 assert_eq "${MAL:-empty}" "empty" "malformed lines yield no rows and no error"
 
+# --- self-IP labelling --------------------------------------------------------
+# The single-account correction: the box's own IP appears in the log as loopback
+# (wp-cron, self-requests) and must be labelled, not read as a client. The self
+# set is injected here rather than discovered, so the test does not depend on the
+# host's real addresses.
+printf 'self-IP labelling\n'
+SF_SELF_IPS="203.0.113.9 198.51.100.7"
+SELF_REPORT="$(printf '%s\n' "$FILTERED" | web_report)"
+self_line="$(printf '%s\n' "$SELF_REPORT" | awk '/Top client IPs/{f=1;next} f && /203.0.113.9/{print; exit}')"
+assert_contains "$self_line" "this server" "the server's own IP is labelled as loopback/self-request"
+attacker_line="$(printf '%s\n' "$SELF_REPORT" | awk '/Top client IPs/{f=1;next} f && /96.126|162.158.158.118/{print; exit}')"
+refute_contains "$attacker_line" "this server" "a genuine client IP is not labelled as the server"
+unset SF_SELF_IPS
+
+# web_self_ips must never fail the caller, even on a host without hostname -I / ip.
+printf 'self-IP discovery is non-fatal\n'
+selfips="$(web_self_ips || printf 'ERRORED')"
+refute_contains "${selfips:-}" "ERRORED" "web_self_ips degrades quietly when it cannot enumerate"
+
+# --- per-domain tally ---------------------------------------------------------
+# Domain-tagged rows (domain <TAB> normalised row) aggregate to a per-vhost count.
+printf 'per-domain tally\n'
+{
+    printf 'cryptoawaz.com\t20260725001500\t203.0.113.9\t200\tGET\t/\tua\n'
+    printf 'cryptoawaz.com\t20260725001501\t203.0.113.9\t200\tGET\t/\tua\n'
+    printf 'cryptoawaz.com\t20260725001502\t203.0.113.9\t200\tGET\t/\tua\n'
+    printf 'cryptocurrencypakistan.org\t20260725001503\t203.0.113.9\t200\tGET\t/\tua\n'
+} >"${WORK}/tagged.tsv"
+DOMAINS="$(web_render_domain_counts <"${WORK}/tagged.tsv")"
+top_domain="$(printf '%s\n' "$DOMAINS" | head -n 1)"
+assert_contains "$top_domain" "cryptoawaz.com" "the busiest vhost leads the per-domain tally"
+assert_contains "$top_domain" "3" "per-domain count is correct"
+assert_contains "$DOMAINS" "cryptocurrencypakistan.org" "the quieter vhost is still listed"
+
 if [[ "$FAILURES" -gt 0 ]]; then
     printf 'webforensics tests: %s failure(s)\n' "$FAILURES" >&2
     exit 1

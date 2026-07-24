@@ -66,6 +66,27 @@ web_ip_is_cloudflare() {
     esac
 }
 
+# The box's own global IP addresses, one per line, discovered at RUNTIME — never
+# hardcoded, so nothing here embeds a server address. WordPress and cPanel make
+# loopback/self-requests (wp-cron, admin-ajax health pings) that appear in the
+# access log as the server hitting itself; labelling them stops the operator
+# mistaking their own IP for a client, and makes a real attacker stand alone.
+# Always succeeds: a host without `hostname -I` or `ip` simply yields nothing.
+web_self_ips() {
+    {
+        hostname -I 2>/dev/null | tr ' ' '\n'
+        ip -o addr show scope global 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1
+    } 2>/dev/null | grep -E '[0-9a-fA-F]' | sort -u || true
+}
+
+# Renders a "count <TAB> domain" tally (stdin: domain-tagged rows) into the
+# per-vhost section. Kept separate so it can be unit-tested with a fixture.
+web_render_domain_counts() {
+    awk -F'\t' '{ c[$1]++ } END { for (d in c) printf "%d\t%s\n", c[d], d }' \
+        | sort -rn | head -n "${WEBLOG_TOP_ROWS:-20}" \
+        | awk -F'\t' '{ printf "  %8d  %s\n", $1, $2 }'
+}
+
 # Reads combined-format access-log lines on stdin and emits a normalised TSV for
 # those whose timestamp falls within [lo, hi], where lo/hi are sortable numeric
 # stamps YYYYMMDDHHMMSS. Comparing pre-formatted local time avoids any dependence
@@ -139,9 +160,14 @@ web_report() {
         | awk '{ printf "  %8d  %s\n", $1, $2 }'
 
     printf '\nTop client IPs (by hits):\n'
+    # SF_SELF_IPS (newline/space-separated) marks the server's own addresses so a
+    # self-request row is labelled benign rather than read as a client.
     printf '%s\n' "$rows" | awk -F'\t' '{ c[$2]++ } END { for (p in c) printf "%d\t%s\n", c[p], p }' \
         | sort -rn | head -n "$top" \
-        | awk '{ printf "  %8d  %s\n", $1, $2 }'
+        | awk -v self="${SF_SELF_IPS:-}" '
+            BEGIN { n = split(self, a, /[ \t\n]+/); for (i = 1; i <= n; i++) if (a[i] != "") s[a[i]] = 1 }
+            { tag = ($2 in s) ? "   <- this server (loopback / self-request, benign)" : ""
+              printf "  %8d  %s%s\n", $1, $2, tag }'
 
     # CDN caveat: if the busiest client IPs are Cloudflare, the column above is the
     # edge, not the attacker. Decide from the top few IPs by volume.
@@ -187,15 +213,20 @@ web_epoch_to_stamp() {
 # Orchestrates a capture for a closed incident: reads a bounded tail of each
 # domain log, filters to the incident window, and writes web.txt. Never fails the
 # caller — an absent log directory or empty window is reported in the file.
+#
+# The body runs in a SUBSHELL, not a brace group: it uses `exit` for early
+# returns, and inside `{ }` that would terminate the whole recorder (panic.sh
+# calls this at incident close). A subshell scopes the exits to the capture.
 web_capture() {
     local dir="$1"
     local out="${dir}/web.txt"
-    local start end lo hi logdir max
-    start="$(incident_meta_get "$dir" started_epoch 0)"
-    end="$(incident_meta_get "$dir" ended_epoch 0)"
-    max="${WEBLOG_MAX_LINES:-200000}"
 
-    {
+    (
+        local start end lo hi logdir max tagged
+        start="$(incident_meta_get "$dir" started_epoch 0)"
+        end="$(incident_meta_get "$dir" ended_epoch 0)"
+        max="${WEBLOG_MAX_LINES:-200000}"
+
         printf '===== Web request attribution =====\n'
         printf 'generated=%s\n' "$(now_iso 2>/dev/null || date -Iseconds)"
 
@@ -217,9 +248,6 @@ web_capture() {
         fi
         printf 'log_dir=%s\n\n' "$logdir"
 
-        # Bounded tail of the active logs, filtered to the window, then reported.
-        # A per-file line cap keeps a busy vhost from unbounding the read; the
-        # window filter discards everything older regardless.
         local -a files=()
         mapfile -t files < <(find "$logdir" -maxdepth 1 -type f \
             ! -name '*.gz' ! -name '*.processed' 2>/dev/null | sort)
@@ -228,11 +256,37 @@ web_capture() {
             exit 0
         fi
 
-        local f
-        for f in "${files[@]}"; do
-            run_with_timeout "${WEBLOG_READ_TIMEOUT:-5}" tail -n "$max" "$f" 2>/dev/null
-        done | web_filter_window "$lo" "$hi" | web_report
-    } >"$out" 2>/dev/null
+        # Discovered live so web_report can label the box's own loopback rows.
+        SF_SELF_IPS="$(web_self_ips)"
+        export SF_SELF_IPS
+
+        # Bounded, timeout-wrapped tail of each active log, each row tagged with its
+        # domain (the log filename) so the same stream yields both a per-vhost tally
+        # and the combined report. The per-file line cap bounds a busy vhost; the
+        # window filter discards everything older regardless.
+        tagged="$(mktemp 2>/dev/null || true)"
+        if [[ -n "$tagged" ]]; then
+            local f
+            for f in "${files[@]}"; do
+                run_with_timeout "${WEBLOG_READ_TIMEOUT:-5}" tail -n "$max" "$f" 2>/dev/null \
+                    | web_filter_window "$lo" "$hi" \
+                    | awk -v d="$(basename "$f")" 'BEGIN { OFS = "\t" } { print d, $0 }'
+            done >"$tagged"
+
+            printf 'Requests per domain (vhost):\n'
+            web_render_domain_counts <"$tagged"
+            printf '\n'
+            cut -f2- "$tagged" | web_report
+            rm -f -- "$tagged" 2>/dev/null || true
+        else
+            # No temp file available: fall back to the combined report without the
+            # per-domain tally rather than failing the capture.
+            local f
+            for f in "${files[@]}"; do
+                run_with_timeout "${WEBLOG_READ_TIMEOUT:-5}" tail -n "$max" "$f" 2>/dev/null
+            done | web_filter_window "$lo" "$hi" | web_report
+        fi
+    ) >"$out" 2>/dev/null
 
     return 0
 }

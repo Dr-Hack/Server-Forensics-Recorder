@@ -30,6 +30,32 @@ happened.
 > pressure that proves whether the stall was storage, CPU, or memory. See
 > [Automatic Root-Cause Analysis](#automatic-root-cause-analysis).
 
+> ### ⭐ New: Request-level attribution — name the URL, script, and client IP
+>
+> "PHP saturated the box" is rarely the answer you need. On a **dedicated,
+> single-account** host the culprit is a *request*, not a user or a process —
+> so the recorder now attributes load down to the endpoint and the client:
+>
+> - **Which PHP script.** Under Apache `mod_lsapi` a worker's argv is rewritten
+>   to `lsphp:<script path>` — the only place the served script is visible
+>   (`pidstat` and `comm` both show a bare `lsphp`). The process ring buffer
+>   parses it into a stable endpoint key, so a spike reads as
+>   `wp-admin/admin-ajax.php, 15 workers`, not `lsphp, 68000% CPU`.
+> - **Which URL and client IP.** At incident close the recorder reads the domain
+>   access logs (`/etc/apache2/logs/domlogs`), filters to the incident window,
+>   and reports top request paths, top client IPs, and WordPress abuse-endpoint
+>   tallies (`xmlrpc.php`, `wp-login.php`, `admin-ajax.php`, `admin-post.php`,
+>   `wp-cron.php`). See it with `server-forensics --requests`.
+> - **Cloudflare-aware.** When the busiest client IPs are Cloudflare edges the
+>   report says so and points at the `CF-Connecting-IP` header and Cloudflare's
+>   own controls — instead of fingering the CDN or suggesting a CSF ban that
+>   would only block edges.
+> - **Self-request aware.** The box's own addresses (discovered at runtime, never
+>   hardcoded) are labelled as loopback / self-requests (`wp-cron` and friends),
+>   so your own IP is never mistaken for an attacker.
+> - **Per-vhost.** Hits are also broken out by domain, so on a multi-site account
+>   the targeted site is explicit.
+
 ## Why This Exists
 
 Intermittent outages often disappear before an administrator can log in. Load
@@ -67,6 +93,9 @@ snapshots are tuned for cPanel-style hosting stacks.
 - **D-state / blocking forensics** — records which processes blocked, on which
   kernel wait channel, and the **PSI** pressure behind it, the answer to
   "high load, low CPU"
+- **Request-level attribution** — names the PHP endpoint (from the `mod_lsapi`
+  worker argv), the URL, and the client IP behind a spike; Cloudflare-aware,
+  self-request aware, and broken out per vhost. See `--requests` and `--runup`
 - Tiny normal overhead
 - One lightweight sample per minute
 - Panic mode only when thresholds trip
