@@ -888,6 +888,22 @@ analysis_verdict_tiers() {
             "$SF_TOP_CPU_COMM" "$SF_TOP_CPU_PID" "$SF_TOP_CPU_PCT"
         proven=1
     fi
+    # On a single-account box 'lsphp' is not an answer; the endpoint the workers
+    # were serving is. When the ring caught their rewritten argv, name it — this
+    # is a direct measurement of the request behind the load.
+    if declare -F ring_window_by_php >/dev/null 2>&1; then
+        local ep_start ep_end top_php
+        ep_start="$(incident_meta_get "$dir" started_epoch 0)"
+        ep_end="$(incident_meta_get "$dir" ended_epoch 0)"
+        if [[ "$ep_start" -gt 0 ]]; then
+            top_php="$(ring_window_by_php "$ep_start" "$ep_end" 2>/dev/null | head -n 1)"
+            if [[ -n "$top_php" ]]; then
+                printf "  - Busiest PHP endpoint was '%s' (peak %s%% CPU across its workers, from the ring buffer).\\n" \
+                    "$(printf '%s' "$top_php" | cut -f1)" "$(printf '%s' "$top_php" | cut -f3)"
+                proven=1
+            fi
+        fi
+    fi
     if [[ -n "${SF_TOP_IO_COMM:-}" ]] && num_gt "${SF_TOP_IO_KBS:-0}" 0; then
         printf "  - Largest disk consumer was '%s' (pid %s) at %s kB/s (per-process measurement).\\n" \
             "$SF_TOP_IO_COMM" "$SF_TOP_IO_PID" "$SF_TOP_IO_KBS"

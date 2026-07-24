@@ -224,3 +224,36 @@ stalled on.
 **What replaced it.** `PANIC_IO_MAX_LINES` (default 20000) caps each sampler,
 and `PANIC_IO_MAX_TRACKED_PIDS` (default 5000) bounds the ranking arrays so a
 fork storm cannot grow them without limit.
+
+## PHP endpoint attribution comes from argv, not pidstat — 0.4.0
+
+**The trap.** The obvious place to aggregate PHP load is the pidstat-based
+offender table, which already groups by `comm`. But `comm` is `lsphp` for every
+worker, and pidstat's `Command` column is no better — neither carries the served
+script. On a single-account dedicated host that leaves the aggregation blind:
+"lsphp at 68000% CPU" names nothing actionable, and per-user grouping is moot
+because there is only one account.
+
+**What was done.** Under Apache `mod_lsapi` the worker's argv is rewritten to
+`lsphp:<script path>`, so the endpoint is visible ONLY in `/proc/<pid>/cmdline`
+(and `ps args=`). The ring buffer — which samples continuously and so survives
+the worker churn that empties the panic-time offender detail — captures `args=`
+and parses the endpoint. The key is the **last two path components**, because
+`mod_lsapi` overwrites argv in place and FRONT-truncates long paths
+(`…ackne/site.com/wp-admin/admin-post.php`); the tail is always intact, so
+`wp-admin/admin-post.php` aggregates cleanly while the leading path is unreliable.
+
+## Web-log window filtering avoids mktime — 0.4.0
+
+**The trap.** Filtering access-log lines to the incident window invites
+`gawk`'s `mktime` to convert each `[dd/Mon/yyyy:hh:mm:ss]` to epoch. `mktime` is
+absent on `mawk`/`busybox` and interprets broken-down time in the process
+timezone — a parser that would work on the target host and silently drop every
+line under a test harness in another zone. That is exactly the class of
+host-only bug that put the pidstat timestamp defect into production.
+
+**What was done.** The log timestamp is reformatted to a sortable local stamp
+`YYYYMMDDHHMMSS` and compared numerically against bounds derived from the
+incident epochs with `date` at the bash layer. The recorder and the logs share
+one host and one clock, so local-time comparison is correct on prod; the parser
+itself is timezone-free and unit-tested with explicit stamps.

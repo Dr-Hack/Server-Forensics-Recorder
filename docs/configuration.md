@@ -151,6 +151,7 @@ RINGBUFFER_RETAIN_SECONDS=900
 RINGBUFFER_LOOKBACK_SECONDS=300
 RINGBUFFER_TOP_EXECS=15
 RINGBUFFER_TOP_PIDS=10
+RINGBUFFER_TOP_PHP=10
 RINGBUFFER_POLL=1
 RINGBUFFER_POLL_INTERVAL=10
 RINGBUFFER_FAST_INTERVAL=10
@@ -186,8 +187,54 @@ The systemd timer uses `OnUnitActiveSec=60` rather than `OnUnitInactiveSec=60`,
 because the latter counts from when the service *finishes* and would stretch the
 metric cadence to poll-window + 60s.
 
+- `RINGBUFFER_TOP_PHP`: PHP endpoint rows kept per sample. Under Apache
+  `mod_lsapi` a worker's argv is rewritten to `lsphp:<script path>` — the only
+  place the served script is visible, since `pidstat` and `comm` both report a
+  bare `lsphp`. The ring parses that into a stable endpoint key (the last two
+  path components, so a front-truncated `…site.com/wp-admin/admin-post.php` still
+  aggregates as `wp-admin/admin-post.php`) and ranks workers by endpoint. On a
+  single-account host this is the actionable unit: "`lsphp` at 68000% CPU" tells
+  you nothing, "`wp-admin/admin-ajax.php`, 15 workers" tells you the request.
+
 View it with `server-forensics --runup [ID]` for an incident, or
-`server-forensics --ring [N]` for the live buffer.
+`server-forensics --ring [N]` for the live buffer. The busiest endpoint also
+appears in the analysis Run-up section and Proven tier.
+
+## Web Request Attribution
+
+```bash
+WEBLOG_DIRS=
+WEBLOG_MAX_LINES=200000
+WEBLOG_TOP_ROWS=20
+WEBLOG_READ_TIMEOUT=5
+WEBLOG_ABUSE_ENDPOINTS="xmlrpc.php wp-login.php admin-ajax.php admin-post.php wp-cron.php"
+```
+
+The endpoint names the script; the access log names the URL and the client IP.
+At incident close the recorder reads a bounded tail of the domain access logs,
+filters to the incident window, and writes `web.txt`: top request paths, top
+client IPs, abuse-endpoint tallies, and top user agents. View it with
+`server-forensics --requests [ID]`, which regenerates on demand so it also works
+mid-incident.
+
+- `WEBLOG_DIRS`: Space-separated search path; empty uses the cPanel defaults
+  (`/etc/apache2/logs/domlogs`, `/usr/local/apache/domlogs`,
+  `/var/log/apache2/domlogs`, `/usr/local/lsws/logs`). Only the first existing
+  directory is read.
+- `WEBLOG_MAX_LINES`: Per-file tail cap. The incident has just closed, so the
+  relevant lines are at the end of each active log; nothing is read in full.
+- `WEBLOG_READ_TIMEOUT`: Seconds any single log read may take before it is
+  abandoned — a log on a stalled mount must never hang the recorder.
+- `WEBLOG_ABUSE_ENDPOINTS`: WordPress endpoints bots hammer, tallied separately
+  so a flood stands out.
+
+**Cloudflare-aware.** Behind Cloudflare every TCP peer — and the log's own
+client-IP column, absent `mod_remoteip` — is a Cloudflare edge, not the attacker.
+When the busiest client IPs are a known Cloudflare range the report says so and
+points at the `CF-Connecting-IP` header and Cloudflare's own controls, rather
+than fingering the CDN or suggesting a CSF ban that would only block Cloudflare's
+edges. Restore the real client IP with `mod_remoteip` for per-IP attribution to
+work directly.
 
 ## Distributed-Load Notice
 

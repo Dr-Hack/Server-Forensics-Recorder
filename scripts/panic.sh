@@ -22,6 +22,8 @@ source "${ROOT_DIR}/lib/aggregate.sh"
 source "${ROOT_DIR}/lib/ioforensics.sh"
 # shellcheck source=../lib/procring.sh
 source "${ROOT_DIR}/lib/procring.sh"
+# shellcheck source=../lib/webforensics.sh
+source "${ROOT_DIR}/lib/webforensics.sh"
 
 append_header() {
     local file="$1"
@@ -331,6 +333,7 @@ main() {
 
         if metrics_are_healthy "$metric_line"; then
             incident_close "$dir" "$metric_line"
+            web_capture "$dir" || log_warn "web request capture failed"
             analysis_generate "$dir" || log_warn "analysis generation failed"
             log_warn "panic mode recovered and incident closed: ${dir}"
             "${SCRIPT_DIR}/rotate.sh" >/dev/null 2>&1 || log_warn "rotation failed"

@@ -28,7 +28,29 @@ views are blind. This release attributes the load to the endpoint.
 
   The analysis Run-up section and `--runup` gain a *Hot PHP endpoints* table;
   idle workers and non-PHP processes are excluded; query strings do not split an
-  endpoint. Rows per sample are capped by `RINGBUFFER_TOP_PHP` (10).
+  endpoint. Rows per sample are capped by `RINGBUFFER_TOP_PHP` (10). The busiest
+  endpoint is now stated in the analysis **Proven** tier — a direct measurement
+  of the request behind the load, not an inference.
+
+- **Web request attribution (`--requests`).** The endpoint names the script; the
+  access log names the URL and client IP. At incident close the recorder reads a
+  bounded tail of the domain logs (`/etc/apache2/logs/domlogs` and legacy paths,
+  overridable via `WEBLOG_DIRS`), filters to the incident window, and writes
+  `web.txt`: top request paths, top client IPs, known-abuse-endpoint tallies
+  (`xmlrpc.php`, `wp-login.php`, `admin-ajax.php`, `admin-post.php`,
+  `wp-cron.php`), and top user agents. `--requests [ID]` prints it and
+  regenerates on demand, so it works mid-incident.
+
+  **Cloudflare-aware.** This host sits behind Cloudflare, so every TCP peer — and
+  the log's own client-IP column, absent `mod_remoteip` — is a Cloudflare edge,
+  not the attacker. When the busiest client IPs are a known Cloudflare range the
+  report says so and points at the `CF-Connecting-IP` header and Cloudflare's own
+  controls, rather than fingering the CDN or suggesting a CSF ban that would only
+  block Cloudflare's edges. Window matching is done on pre-formatted local time
+  to avoid any dependency on `gawk`'s `mktime`.
+
+  Reads are bounded (`WEBLOG_MAX_LINES` tail per file) and timeout-wrapped
+  (`WEBLOG_READ_TIMEOUT`); nothing here touches the network or a package manager.
 
 ## 0.3.0 — 2026-07-24
 

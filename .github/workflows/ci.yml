@@ -40,6 +40,9 @@ jobs:
       - name: Run aggregation and ring buffer tests
         run: bash tests/aggregate.sh
 
+      - name: Run web request attribution tests
+        run: bash tests/webforensics.sh
+
       - name: Check shfmt formatting
         run: bash tests/format.sh
 

@@ -33,6 +33,8 @@ source "${ROOT_DIR}/lib/aggregate.sh"
 source "${ROOT_DIR}/lib/ioforensics.sh"
 # shellcheck source=../lib/procring.sh
 source "${ROOT_DIR}/lib/procring.sh"
+# shellcheck source=../lib/webforensics.sh
+source "${ROOT_DIR}/lib/webforensics.sh"
 
 usage() {
     cat <<'USAGE'
@@ -52,6 +54,9 @@ Commands:
                     disk read+write) for incident ID, or the latest incident.
   --io [ID]         Print the full I/O attribution capture (pidstat, iostat, PSI,
                     diskstats, mounts, per-offender /proc detail) for an incident.
+  --requests [ID]   Print web request attribution for an incident: top URL paths,
+                    top client IPs (Cloudflare-aware), and abuse-endpoint tallies
+                    over the incident window, from the domain access logs.
   --runup [ID]      Print the pre-incident process ring buffer for an incident —
                     what was building up before the trigger fired.
   --ring [N]        Print the last N seconds of the live process ring buffer
@@ -452,6 +457,33 @@ cmd_io() {
     cat "${logs[@]}"
 }
 
+# The web requests seen during an incident window: top paths, top client IPs
+# (with a Cloudflare caveat), and abuse-endpoint tallies. Regenerates on demand
+# when web.txt is absent (incident predates the feature, or is still active), so
+# it works mid-incident too.
+cmd_requests() {
+    local dir
+    dir="$(resolve_incident "${1:-}")" || return 1
+
+    if [[ -z "$dir" ]]; then
+        printf 'no incidents recorded\n'
+        return 0
+    fi
+
+    printf 'incident-dir=%s\n\n' "$dir"
+
+    if [[ ! -s "${dir}/web.txt" ]]; then
+        web_capture "$dir" 2>/dev/null || true
+    fi
+
+    if [[ -s "${dir}/web.txt" ]]; then
+        cat "${dir}/web.txt"
+    else
+        printf 'no web request attribution available for %s\n' "$(basename "$dir")" >&2
+        return 1
+    fi
+}
+
 # What was building up BEFORE the trigger fired. load1 lags, so this is the
 # window the panic samplers structurally cannot reach.
 cmd_runup() {
@@ -554,6 +586,9 @@ main() {
             ;;
         --io)
             cmd_io "${2:-}"
+            ;;
+        --requests)
+            cmd_requests "${2:-}"
             ;;
         --runup)
             cmd_runup "${2:-}"
