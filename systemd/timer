@@ -3,7 +3,11 @@ Description=Run Server Forensics Recorder every minute
 
 [Timer]
 OnBootSec=1min
-OnUnitInactiveSec=60
+# Measured from when the service STARTS, not when it finishes. The watcher now
+# spends the tail of each interval polling /proc/loadavg for the pre-incident
+# ring buffer, so OnUnitInactiveSec would silently stretch the metric cadence to
+# poll-window + 60s. OnUnitActiveSec keeps collection at a true 60 seconds.
+OnUnitActiveSec=60
 AccuracySec=5s
 Unit=server-forensics.service
 Persistent=false

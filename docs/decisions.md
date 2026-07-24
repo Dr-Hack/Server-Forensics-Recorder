@@ -9,6 +9,75 @@ Newest first.
 
 ---
 
+## Ranking spikes by PID alone — replaced in 0.3.0
+
+**What it did.** `--offenders` and the analysis named the single highest-CPU and
+highest-I/O PID.
+
+**Why it was wrong.** `incident-20260724-193525` hit 93.4% CPU on a 4-core box
+(~374% of a core) while the top single process read **9%**. The load was
+fourteen short-lived `lsphp` workers at roughly 26% each. A PID-ranked table
+cannot express "PHP took the box", so the report named a 9% process and the
+whole table summed to ~49% of what was actually consumed.
+
+**What replaced it.** Combined-by-executable and by-subsystem aggregation leads
+every report, with process count, peak single process and average per process.
+Plus an explicit notice when total CPU exceeds 90% with no single process over
+15%, so a distributed cause is never read as "nothing was using the CPU".
+
+## Sampling per-process data only after the trigger — replaced in 0.3.0
+
+**What it did.** All per-process measurement happened inside panic mode, which
+starts when `load1` crosses `LOAD_THRESHOLD`.
+
+**Why it was wrong.** `load1` is a one-minute exponentially-weighted average, so
+it peaks *after* the work does. On the incident above, load went 0.63 → 22.46
+between two 60-second samples; the trigger fired at 19:35:25 and the first
+`pidstat` window landed as the workers were exiting. The tool was structurally
+guaranteed to measure the recovery rather than the event for any burst shorter
+than the collector interval.
+
+**Considered and rejected:** making the trigger faster (`procs_running` from
+`/proc/stat`, a lower `LSPHP_THRESHOLD`). These help marginally but cannot fix
+the ordering problem — if the first measurement happens after the trigger, a
+30-second burst is still measured on its way down. The user also chose to leave
+triggers unchanged to avoid alert noise.
+
+**Also rejected:** evaluating an acceleration watermark once per 60-second
+sample. At 19:34:12 load was 0.63 — there was nothing to trip on, and the entire
+burst then ran inside the 69-second gap. Watermark-on-the-slow-sample buys
+nothing for exactly the case it was meant to catch.
+
+**What replaced it.** A continuously-maintained ring buffer, with acceleration
+driven by a cheap 10-second poll of `/proc/loadavg` rather than by the 60-second
+sample. The ring never declares an incident, so it cannot change trigger
+behaviour.
+
+## Treating PID 1 as an offender — fixed in 0.3.0
+
+**What it did.** PID 1 topped the I/O ranking on a live incident (8.7 MB/s read)
+and was promoted into the *Proven* tier as "largest disk consumer".
+
+**Why it was wrong.** init performs writes on behalf of other services — journal
+forwarding, unit state, cgroup bookkeeping. Naming it is almost always
+misattribution, and it displaced the real consumer from the report.
+
+**What replaced it.** PID 1 is excluded from the named top consumer, the first
+non-init process is named instead, and the capture explains what the delegated
+activity actually was, classified from its open descriptors.
+
+## Verifying a `ps`-based parser only on the target host — avoided in 0.3.0
+
+**What was nearly repeated.** `ring_sample` originally piped `ps -eo` straight
+into an inline awk program. Git Bash on the development machine has no `ps -eo`,
+so the parser could not be exercised locally at all — the same position that let
+the pidstat timestamp bug reach production.
+
+**What was done instead.** Listing and parsing were split: `ring_format` reads
+`ps` output on stdin and is fed captured Linux output by the test suite, while
+`ring_sample` only supplies the pipe. The parser is now covered by thirteen
+assertions without needing the target host.
+
 ## Scoring a cause from process *names* — replaced in 0.2.0
 
 **What it did.** `analysis_classify` awarded points to "Maintenance interaction"

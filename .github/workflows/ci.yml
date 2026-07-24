@@ -37,6 +37,9 @@ jobs:
       - name: Run I/O attribution tests
         run: bash tests/ioforensics.sh
 
+      - name: Run aggregation and ring buffer tests
+        run: bash tests/aggregate.sh
+
       - name: Check shfmt formatting
         run: bash tests/format.sh
 

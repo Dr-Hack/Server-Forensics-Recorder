@@ -2,7 +2,7 @@
 # Shared utility functions for server-forensics.
 # shellcheck disable=SC2034
 
-SERVER_FORENSICS_VERSION="0.2.0"
+SERVER_FORENSICS_VERSION="0.3.0"
 
 sf_root() {
     if [[ -n "${SF_ROOT:-}" ]]; then
@@ -90,6 +90,18 @@ load_config() {
     PANIC_IO_TABLE_ROWS="${PANIC_IO_TABLE_ROWS:-20}"
     PANIC_IO_MAX_LINES="${PANIC_IO_MAX_LINES:-20000}"
     PANIC_IO_MAX_TRACKED_PIDS="${PANIC_IO_MAX_TRACKED_PIDS:-5000}"
+    ENABLE_PROC_RING="${ENABLE_PROC_RING:-1}"
+    RINGBUFFER_RETAIN_SECONDS="${RINGBUFFER_RETAIN_SECONDS:-900}"
+    RINGBUFFER_LOOKBACK_SECONDS="${RINGBUFFER_LOOKBACK_SECONDS:-300}"
+    RINGBUFFER_TOP_EXECS="${RINGBUFFER_TOP_EXECS:-15}"
+    RINGBUFFER_TOP_PIDS="${RINGBUFFER_TOP_PIDS:-10}"
+    RINGBUFFER_POLL="${RINGBUFFER_POLL:-1}"
+    RINGBUFFER_POLL_INTERVAL="${RINGBUFFER_POLL_INTERVAL:-10}"
+    RINGBUFFER_FAST_INTERVAL="${RINGBUFFER_FAST_INTERVAL:-10}"
+    RINGBUFFER_FAST_LOAD="${RINGBUFFER_FAST_LOAD:-3}"
+    RINGBUFFER_POLL_WINDOW="${RINGBUFFER_POLL_WINDOW:-45}"
+    AGG_DISTRIBUTED_CPU_PCT="${AGG_DISTRIBUTED_CPU_PCT:-90}"
+    AGG_DISTRIBUTED_TOP_PCT="${AGG_DISTRIBUTED_TOP_PCT:-15}"
     PANIC_IO_LSOF_LINES="${PANIC_IO_LSOF_LINES:-60}"
     PANIC_IO_DETAIL_TIMEOUT="${PANIC_IO_DETAIL_TIMEOUT:-5}"
     ENABLE_PLUGINS="${ENABLE_PLUGINS:-1}"
@@ -196,6 +208,31 @@ validate_config() {
     [[ "$PANIC_IO_MAX_LINES" -ge 100 ]] || fail_config "PANIC_IO_MAX_LINES must be at least 100"
     is_uint "$PANIC_IO_MAX_TRACKED_PIDS" || fail_config "PANIC_IO_MAX_TRACKED_PIDS must be a non-negative integer"
     [[ "$PANIC_IO_MAX_TRACKED_PIDS" -ge 10 ]] || fail_config "PANIC_IO_MAX_TRACKED_PIDS must be at least 10"
+
+    sf_is_bool_value "$ENABLE_PROC_RING" || fail_config "ENABLE_PROC_RING must be a boolean value"
+    sf_is_bool_value "$RINGBUFFER_POLL" || fail_config "RINGBUFFER_POLL must be a boolean value"
+    is_uint "$RINGBUFFER_RETAIN_SECONDS" || fail_config "RINGBUFFER_RETAIN_SECONDS must be a non-negative integer"
+    [[ "$RINGBUFFER_RETAIN_SECONDS" -ge 60 ]] || fail_config "RINGBUFFER_RETAIN_SECONDS must be at least 60"
+    is_uint "$RINGBUFFER_LOOKBACK_SECONDS" || fail_config "RINGBUFFER_LOOKBACK_SECONDS must be a non-negative integer"
+    [[ "$RINGBUFFER_LOOKBACK_SECONDS" -le "$RINGBUFFER_RETAIN_SECONDS" ]] \
+        || fail_config "RINGBUFFER_LOOKBACK_SECONDS must not exceed RINGBUFFER_RETAIN_SECONDS"
+    is_uint "$RINGBUFFER_TOP_EXECS" || fail_config "RINGBUFFER_TOP_EXECS must be a non-negative integer"
+    [[ "$RINGBUFFER_TOP_EXECS" -ge 1 ]] || fail_config "RINGBUFFER_TOP_EXECS must be at least 1"
+    is_uint "$RINGBUFFER_TOP_PIDS" || fail_config "RINGBUFFER_TOP_PIDS must be a non-negative integer"
+    [[ "$RINGBUFFER_TOP_PIDS" -ge 1 ]] || fail_config "RINGBUFFER_TOP_PIDS must be at least 1"
+    is_uint "$RINGBUFFER_POLL_INTERVAL" || fail_config "RINGBUFFER_POLL_INTERVAL must be a non-negative integer"
+    [[ "$RINGBUFFER_POLL_INTERVAL" -ge 1 ]] || fail_config "RINGBUFFER_POLL_INTERVAL must be at least 1"
+    is_uint "$RINGBUFFER_FAST_INTERVAL" || fail_config "RINGBUFFER_FAST_INTERVAL must be a non-negative integer"
+    [[ "$RINGBUFFER_FAST_INTERVAL" -ge 1 ]] || fail_config "RINGBUFFER_FAST_INTERVAL must be at least 1"
+    is_number "$RINGBUFFER_FAST_LOAD" || fail_config "RINGBUFFER_FAST_LOAD must be numeric"
+    is_uint "$RINGBUFFER_POLL_WINDOW" || fail_config "RINGBUFFER_POLL_WINDOW must be a non-negative integer"
+    # The poll window must end before the next timer tick, or the watcher would
+    # still be polling when systemd tries to start the next collection.
+    [[ "$RINGBUFFER_POLL_WINDOW" -lt "$INTERVAL" ]] \
+        || fail_config "RINGBUFFER_POLL_WINDOW must be less than INTERVAL"
+
+    is_number "$AGG_DISTRIBUTED_CPU_PCT" || fail_config "AGG_DISTRIBUTED_CPU_PCT must be numeric"
+    is_number "$AGG_DISTRIBUTED_TOP_PCT" || fail_config "AGG_DISTRIBUTED_TOP_PCT must be numeric"
     is_uint "$PANIC_IO_LSOF_LINES" || fail_config "PANIC_IO_LSOF_LINES must be a non-negative integer"
     is_uint "$PANIC_IO_DETAIL_TIMEOUT" || fail_config "PANIC_IO_DETAIL_TIMEOUT must be a non-negative integer"
     [[ "$PANIC_IO_DETAIL_TIMEOUT" -ge 1 ]] || fail_config "PANIC_IO_DETAIL_TIMEOUT must be at least 1"

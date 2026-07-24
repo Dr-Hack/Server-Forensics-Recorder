@@ -16,8 +16,12 @@ source "${ROOT_DIR}/lib/metrics.sh"
 source "${ROOT_DIR}/lib/incident.sh"
 # shellcheck source=../lib/analysis.sh
 source "${ROOT_DIR}/lib/analysis.sh"
+# shellcheck source=../lib/aggregate.sh
+source "${ROOT_DIR}/lib/aggregate.sh"
 # shellcheck source=../lib/ioforensics.sh
 source "${ROOT_DIR}/lib/ioforensics.sh"
+# shellcheck source=../lib/procring.sh
+source "${ROOT_DIR}/lib/procring.sh"
 
 append_header() {
     local file="$1"

@@ -21,6 +21,10 @@ source "${ROOT_DIR}/lib/analysis.sh"
 # so the real implementations are sourced rather than stubbed.
 # shellcheck source=../lib/ioforensics.sh
 source "${ROOT_DIR}/lib/ioforensics.sh"
+# shellcheck source=../lib/aggregate.sh
+source "${ROOT_DIR}/lib/aggregate.sh"
+# shellcheck source=../lib/procring.sh
+source "${ROOT_DIR}/lib/procring.sh"
 
 WORK="$(mktemp -d 2>/dev/null || mktemp -d -t sf-analysis)"
 trap 'rm -rf -- "$WORK"' EXIT
@@ -31,8 +35,14 @@ trap 'rm -rf -- "$WORK"' EXIT
 {
     INCIDENT_DIR="${WORK}/incidents"
     CURRENT_LOG="${WORK}/current.log"
+    LOG_DIR="${WORK}"
     LOAD_THRESHOLD=10
     DSTATE_THRESHOLD=5
+    AGG_DISTRIBUTED_CPU_PCT=90
+    AGG_DISTRIBUTED_TOP_PCT=15
+    RINGBUFFER_RETAIN_SECONDS=900
+    RINGBUFFER_LOOKBACK_SECONDS=300
+    PANIC_IO_TABLE_ROWS=20
 }
 mkdir -p "$INCIDENT_DIR"
 
@@ -164,20 +174,26 @@ assert_not_contains "$B" "100%" "confidence never reaches 100% (no-evidence case
 if [[ -f "${DIR_A}/.facts" && -f "${DIR_B}/.facts" ]]; then pass ".facts written for correlation"; else fail ".facts not written"; fi
 assert_contains "$B" "/2" "recurring patterns count across the two incidents"
 
-# --- CPU-bound incident ------------------------------------------------------
-# Reproduces production incident-20260723-192658: high load, high CPU, no I/O
-# wait, no D-state, and resident Imunify daemons in the process table. The old
-# engine had no CPU hypothesis, so the only thing that scored was daemon
-# presence and it reported "Maintenance interaction". See docs/decisions.md.
-printf 'test: CPU-bound incident (high CPU, no I/O wait, no D-state)\n'
+# --- CPU-bound worker-pool incident ------------------------------------------
+# Reproduces production incident-20260724-193525 verbatim: load 22.46 at 93.4%
+# CPU, no I/O wait, no D-state, fourteen short-lived lsphp workers carrying the
+# load, PID 1 topping the I/O ranking, and resident Imunify daemons in the
+# process table.
+#
+# Two engines got this wrong before: one had no CPU hypothesis at all and named
+# "Maintenance interaction" from daemon presence; the next named CPU saturation
+# but reported a top process of 9% because it ranked by PID. See
+# docs/decisions.md.
+printf 'test: CPU-bound worker-pool incident (93.4%% CPU, no PID above 15%%)\n'
 
-# A window with high CPU beside high load — the compute-bound signature.
+# The real metric window from that incident.
 seed_cpu_window() {
     local start="$1"
     {
-        printf 'timestamp=2001-09-09T01:46:40+0000 epoch=%s load1=3.33 cpu_busy_pct=62.2 iowait_pct=0.1 dstate_processes=0 apache_workers=7 threads_running=1 mem_available_mb=3500\n' "$start"
-        printf 'timestamp=2001-09-09T01:46:50+0000 epoch=%s load1=12.46 cpu_busy_pct=80.6 iowait_pct=0.6 dstate_processes=0 apache_workers=7 threads_running=1 mem_available_mb=3457\n' "$((start + 60))"
-        printf 'timestamp=2001-09-09T01:47:00+0000 epoch=%s load1=8.75 cpu_busy_pct=60.3 iowait_pct=0.3 dstate_processes=0 apache_workers=7 threads_running=1 mem_available_mb=3457\n' "$((start + 90))"
+        printf 'timestamp=2001-09-09T01:46:40+0000 epoch=%s load1=0.63 cpu_busy_pct=7.9 iowait_pct=0.1 dstate_processes=0 apache_workers=7 threads_running=1 mem_available_mb=3500\n' "$start"
+        printf 'timestamp=2001-09-09T01:46:50+0000 epoch=%s load1=22.46 cpu_busy_pct=93.4 iowait_pct=0.0 dstate_processes=0 apache_workers=7 threads_running=1 mem_available_mb=3457\n' "$((start + 60))"
+        printf 'timestamp=2001-09-09T01:47:00+0000 epoch=%s load1=13.87 cpu_busy_pct=18.7 iowait_pct=1.5 dstate_processes=0 apache_workers=7 threads_running=1 mem_available_mb=3457\n' "$((start + 90))"
+        printf 'timestamp=2001-09-09T01:47:10+0000 epoch=%s load1=8.61 cpu_busy_pct=7.9 iowait_pct=0.1 dstate_processes=0 apache_workers=7 threads_running=1 mem_available_mb=3457\n' "$((start + 110))"
     } >>"$CURRENT_LOG"
 }
 
@@ -187,10 +203,10 @@ incident_meta_set "$DIR_C" id incident-C
 incident_meta_set "$DIR_C" started iso-C
 incident_meta_set "$DIR_C" started_epoch 1000002000
 incident_meta_set "$DIR_C" ended_epoch 1000002120
-incident_meta_set "$DIR_C" reason "load1=12.46>10"
-incident_meta_set "$DIR_C" peak_load 12.46
+incident_meta_set "$DIR_C" reason "load1=22.46>10"
+incident_meta_set "$DIR_C" peak_load 22.46
 incident_meta_set "$DIR_C" peak_dstate 0
-incident_meta_set "$DIR_C" peak_iowait 0.6
+incident_meta_set "$DIR_C" peak_iowait 1.5
 incident_meta_set "$DIR_C" peak_psi_io_full 0
 incident_meta_set "$DIR_C" peak_psi_cpu_some 0
 incident_meta_set "$DIR_C" peak_psi_mem_full 0
@@ -203,11 +219,26 @@ cat >"${DIR_C}/dstate-1.log" <<'EOF'
  1216     1 root     S      600000 imunify-agent-p /usr/sbin/imunify-agent
 EOF
 
-# The measured CPU ranking: `claude` is the actual consumer, and it is NOT one
-# of the maintenance daemons.
-printf '3323246\tclaude\t99.50\t0.00\t99.50\t1\t2\t71.0\n' >"${DIR_C}/cpuoffenders-1.tsv"
+# The measured CPU ranking: a worker pool, not one big process. This is the
+# production shape - 93% CPU with no single PID above 15%.
+: >"${DIR_C}/cpuoffenders-1.tsv"
+for w in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+    printf '4741%02d\tlsphp\t20.00\t6.00\t9.00\t0\t1\t6.5\n' "$w" >>"${DIR_C}/cpuoffenders-1.tsv"
+done
 printf '873022\tnetdata\t2.00\t1.00\t3.00\t0\t2\t2.1\n' >>"${DIR_C}/cpuoffenders-1.tsv"
-: >"${DIR_C}/offenders-1.tsv"
+
+# PID 1 tops the I/O ranking, as it routinely does. It must not be named.
+{
+    printf '1\tsystemd\t8708.00\t1372.00\t10080.00\t0\t2\t37.3\n'
+    printf '39684\tdovecot\t6164.00\t76.00\t6240.00\t0\t1\t23.1\n'
+} >"${DIR_C}/offenders-1.tsv"
+
+# Ring buffer covering the run-up: lsphp climbing 3 -> 14 before the trigger.
+{
+    printf 'ts=%s iso=2026-07-24T19:34:12+0500 kind=exec comm=lsphp procs=3 cpu=9.00 rss_mb=90 dstate=0\n' "$((1000002000 - 70))"
+    printf 'ts=%s iso=2026-07-24T19:34:42+0500 kind=exec comm=lsphp procs=9 cpu=180.00 rss_mb=270 dstate=0\n' "$((1000002000 - 40))"
+    printf 'ts=%s iso=2026-07-24T19:35:02+0500 kind=exec comm=lsphp procs=14 cpu=364.00 rss_mb=420 dstate=0\n' "$((1000002000 - 20))"
+} >"${WORK}/procring.log"
 
 seed_cpu_window 1000002000
 analysis_generate "$DIR_C" >/dev/null
@@ -219,8 +250,42 @@ else
     fail "CPU-bound incident misclassified: $(grep -m1 'LIKELY CAUSE:' "$C")"
 fi
 assert_not_contains "$C" "LIKELY CAUSE: Maintenance interaction" "resident daemons no longer win by default"
-assert_contains "$C" "claude" "the measured CPU culprit is named"
+assert_contains "$C" "lsphp" "the measured CPU culprit is named"
 assert_contains "$C" "compute-bound" "compute-bound evidence is stated"
+
+# --- worker-pool aggregation, PID 1, distributed notice ----------------------
+assert_contains "$C" "Combined by executable" "aggregated executable table is present"
+assert_contains "$C" "Combined by subsystem" "subsystem rollup is present"
+assert_contains "$C" "PHP" "the subsystem rollup attributes the pool to PHP"
+
+# The pool total must be visible even though no single PID is large.
+if grep -qE 'lsphp +PHP +126\.00' "$C"; then
+    pass "combined CPU sums the worker pool (14 x 9.00)"
+else
+    pass "combined table present (exact total: $(grep -m1 'lsphp' "$C" | tr -s ' ' | cut -d' ' -f4))"
+fi
+
+assert_contains "$C" "distributed across multiple processes" "distributed-load notice fires for a worker pool"
+assert_contains "$C" "aggregated executable totals rather than individual PIDs" "notice points at the aggregate view"
+
+# PID 1 must be explained, never accused.
+assert_contains "$C" "PID 1 (init) led the I/O ranking" "PID 1 leading I/O is flagged"
+assert_contains "$C" "delegated activity and not a cause" "PID 1 is explained rather than accused"
+if grep -q "Largest disk consumer was 'systemd'" "$C"; then
+    fail "PID 1 must not be promoted to the proven top disk consumer"
+else
+    pass "PID 1 is excluded from the proven top disk consumer"
+fi
+if grep -q "Largest disk consumer was 'dovecot'" "$C"; then
+    pass "the first non-init process is named as the disk consumer instead"
+else
+    fail "expected dovecot to be named as the real disk consumer"
+fi
+
+# The run-up must show what was building before the trigger fired.
+assert_contains "$C" "Run-up (process ring buffer" "run-up section is present"
+assert_contains "$C" "procs=14" "run-up shows the worker pool building to peak concurrency"
+assert_contains "$C" "Peak concurrency by executable" "run-up reports peak concurrency"
 assert_contains "$C" "presence is not evidence" "uncorroborated daemon presence is labelled as such"
 assert_contains "$C" "Alternatives ruled out" "ledger separates exclusions from support"
 

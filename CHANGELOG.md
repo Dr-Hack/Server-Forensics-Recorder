@@ -2,6 +2,57 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.3.0 — 2026-07-24
+
+The recorder measured the right things but arrived after the event, and ranked
+by PID when the cause was a worker pool. Both are fixed.
+
+### Added
+
+- **Pre-incident process ring buffer.** Panic mode is triggered by `load1`, a
+  one-minute average that lags the work causing it, so a sub-minute burst is
+  always sampled on its way down. On `incident-20260724-193525` the offender
+  table accounted for ~49% of a machine that had been at 374%, and the largest
+  process read 9%, because the fourteen `lsphp` workers had already exited. No
+  trigger can outrun that: if the first per-process measurement happens after the
+  trigger, the burst is over.
+
+  The watcher now records a compact per-executable snapshot every cycle and, in
+  between, polls `/proc/loadavg` every 10s — a single small read — taking a full
+  sample only while load exceeds `RINGBUFFER_FAST_LOAD`. Steady-state cost on an
+  idle server is one `ps` per minute; measured footprint is 2.5 KB per sample,
+  37 KB of 15-minute history idle and 223 KB at maximum sampling rate.
+
+  The ring **never declares an incident**, so enabling it cannot change when
+  panic mode fires. The analysis gains a *Run-up* section showing what was
+  building before the trigger; `--runup [ID]` and `--ring [N]` expose it directly.
+- **Aggregation by executable and subsystem.** Ranking by PID is misleading for
+  worker pools: fourteen `lsphp` at 26% each is invisible per-PID and obvious as
+  one row. Reports now lead with a combined table — executable, subsystem,
+  combined read/write/CPU, process count, peak single process, average per
+  process — plus a subsystem rollup that collapses the nine differently-named
+  Imunify daemons into one line. Per-PID tables are kept below.
+- **Distributed-load notice.** When the machine exceeds
+  `AGG_DISTRIBUTED_CPU_PCT` (90) but no single process reaches
+  `AGG_DISTRIBUTED_TOP_PCT` (15), the report states plainly that usage is spread
+  across processes and points at the aggregated totals, rather than leaving a
+  9% top process to read as "nothing was using the CPU".
+- **PID 1 is classified, not accused.** init writes on behalf of other services,
+  so it routinely tops an I/O ranking without being a workload. It is now
+  excluded from the named top consumer, and the capture explains *what* the
+  delegated activity was — journal logging, service management, or undetermined —
+  from its open descriptors, with the heaviest journal-writing units listed.
+
+### Changed
+
+- The systemd timer now uses `OnUnitActiveSec=60` rather than
+  `OnUnitInactiveSec=60`. The latter counts from when the service *finishes*,
+  which would have stretched the metric cadence to poll-window + 60s once the
+  watcher began using the tail of each interval for ring polling.
+- *Observed facts* falls back to values re-derived from the offender tables when
+  incident meta is absent, so it can no longer contradict the *Inference* block
+  when an older incident's analysis is regenerated.
+
 ## 0.2.0 — 2026-07-23
 
 Named causes are now backed by per-process measurement rather than by which

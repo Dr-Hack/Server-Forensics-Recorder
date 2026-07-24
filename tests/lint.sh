@@ -16,13 +16,16 @@ shellcheck -x \
     "$ROOT_DIR/scripts/watcher.sh" \
     "$ROOT_DIR/scripts/panic.sh" \
     "$ROOT_DIR/scripts/rotate.sh" \
+    "$ROOT_DIR/lib/aggregate.sh" \
     "$ROOT_DIR/lib/analysis.sh" \
     "$ROOT_DIR/lib/incident.sh" \
     "$ROOT_DIR/lib/ioforensics.sh" \
     "$ROOT_DIR/lib/logging.sh" \
     "$ROOT_DIR/lib/metrics.sh" \
     "$ROOT_DIR/lib/plugins.sh" \
+    "$ROOT_DIR/lib/procring.sh" \
     "$ROOT_DIR/lib/utils.sh" \
+    "$ROOT_DIR/tests/aggregate.sh" \
     "$ROOT_DIR/tests/analysis.sh" \
     "$ROOT_DIR/tests/format.sh" \
     "$ROOT_DIR/tests/ioforensics.sh" \

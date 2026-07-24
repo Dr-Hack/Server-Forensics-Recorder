@@ -396,6 +396,74 @@ io_render_table() {
     io_render_stream "$kind" <"$tsv"
 }
 
+# --- PID 1 (init) -------------------------------------------------------------
+
+# PID 1 performs writes on behalf of other services — journal forwarding, unit
+# state, cgroup bookkeeping — so it regularly tops an I/O ranking without being
+# the thing that caused the load. Naming it as the offender is almost always
+# wrong. This reports WHAT the delegated activity was rather than suppressing it.
+io_classify_pid1() {
+    local file="$1"
+    local tmo="${PANIC_IO_DETAIL_TIMEOUT:-5}"
+
+    [[ -d /proc/1 ]] || return 0
+
+    {
+        printf '\n--- pid 1 (init) delegated-activity classification ---\n'
+        printf 'note: PID 1 writes on behalf of other services. High I/O here is\n'
+        printf '      usually delegated work, not a workload of its own.\n\n'
+
+        printf 'comm:    %s\n' "$(cat /proc/1/comm 2>/dev/null || printf '?')"
+        printf 'cmdline: %s\n' "$(tr '\0' ' ' </proc/1/cmdline 2>/dev/null || printf '?')"
+
+        printf 'io:\n'
+        if [[ -r /proc/1/io ]]; then
+            sed 's/^/  /' /proc/1/io 2>/dev/null || printf '  [unreadable]\n'
+        else
+            printf '  [unavailable]\n'
+        fi
+
+        # Classify by what PID 1 actually has open. Journal descriptors mean the
+        # writes are logging; /run/systemd means unit and cgroup management.
+        local fds journal=0 runstate=0 other=0
+        fds="$(run_with_timeout "$tmo" ls -l /proc/1/fd 2>/dev/null || true)"
+        if [[ -n "$fds" ]]; then
+            journal="$(printf '%s\n' "$fds" | grep -c -e 'journal' -e '/run/log' || true)"
+            runstate="$(printf '%s\n' "$fds" | grep -c '/run/systemd' || true)"
+            other="$(printf '%s\n' "$fds" | grep -c '^l' || true)"
+        fi
+
+        printf '\nopen descriptors: %s total, %s journal/log, %s /run/systemd\n' \
+            "${other:-0}" "${journal:-0}" "${runstate:-0}"
+
+        printf 'assessment: '
+        if [[ "${journal:-0}" -gt 0 && "${journal:-0}" -ge "${runstate:-0}" ]]; then
+            printf 'predominantly JOURNAL LOGGING — the writes are log traffic\n'
+            printf '            forwarded from other units. Look at what is logging\n'
+            printf '            heavily (journalctl --since, then by unit), not at PID 1.\n'
+        elif [[ "${runstate:-0}" -gt 0 ]]; then
+            printf 'predominantly SERVICE MANAGEMENT — unit state and cgroup\n'
+            printf '            bookkeeping under /run/systemd. Look for a unit\n'
+            printf '            restart loop (systemctl list-units --failed).\n'
+        else
+            printf 'DELEGATED activity of an undetermined kind. PID 1 is not\n'
+            printf '            itself a workload; attribute the load elsewhere.\n'
+        fi
+
+        printf '\nheaviest journal writers to check:\n'
+        if command_exists journalctl; then
+            run_with_timeout "$tmo" journalctl --since "-2 min" --no-pager -o json 2>/dev/null \
+                | grep -o '"_SYSTEMD_UNIT":"[^"]*"' 2>/dev/null \
+                | sed 's/.*:"//;s/"$//' | sort | uniq -c | sort -rn | head -n 5 \
+                | sed 's/^/  /' || printf '  [journalctl query unavailable]\n'
+        else
+            printf '  [journalctl not installed]\n'
+        fi
+    } >>"$file" 2>/dev/null
+
+    return 0
+}
+
 # --- entry point -------------------------------------------------------------
 
 # Captures the full resource-attribution set for one panic snapshot.
@@ -483,11 +551,26 @@ capture_io_forensics() {
     io_rank_offenders "${work}/pidstat-d" >"$tsv" 2>/dev/null || : >"$tsv"
     io_rank_cpu "${work}/pidstat-u" >"$cputsv" 2>/dev/null || : >"$cputsv"
 
+    # Aggregation first: for worker-pool workloads (many short-lived lsphp) the
+    # per-PID tables understate the cause badly, so the combined view leads.
+    io_header "$file" "COMBINED BY EXECUTABLE (the actionable view)"
+    agg_combine "$cputsv" "$tsv" | agg_render_combined >>"$file"
+
+    io_header "$file" "COMBINED BY SUBSYSTEM"
+    agg_combine "$cputsv" "$tsv" | agg_rollup | agg_render_rollup >>"$file"
+
     io_header "$file" "OFFENDING PROCESSES (ranked by disk read+write)"
     io_render_table "$tsv" io >>"$file"
 
     io_header "$file" "OFFENDING PROCESSES (ranked by CPU)"
     io_render_table "$cputsv" cpu >>"$file"
+
+    # PID 1 tops I/O rankings routinely because it writes for other services;
+    # explain the delegated activity rather than letting it read as the culprit.
+    if [[ -s "$tsv" ]] && awk -F'\t' 'NR==1 && $1 == 1 { found=1 } END { exit !found }' "$tsv"; then
+        io_header "$file" "PID 1 delegated-activity note"
+        io_classify_pid1 "$file"
+    fi
 
     # --- per-offender detail --------------------------------------------------
     # The union of both rankings, so a compute-bound culprit gets the same /proc

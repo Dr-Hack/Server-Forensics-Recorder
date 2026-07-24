@@ -218,6 +218,52 @@ analysis_top_measured() {
     printf '%s\t%s\t%s\n' "$comm" "$total" "$pid"
 }
 
+# The same, but skipping PID 1. init performs writes on behalf of other services
+# (journal forwarding, unit state, cgroup bookkeeping), so it tops I/O rankings
+# routinely without being a workload. Attributing an incident to it is nearly
+# always wrong, so the leader is taken from the first non-init row and PID 1 is
+# reported separately with its delegated-activity note.
+analysis_top_measured_real() {
+    local dir="$1"
+    local kind="$2"
+    local rows
+
+    case "$kind" in
+        cpu)
+            declare -F io_aggregate_cpu >/dev/null 2>&1 || return 0
+            rows="$(io_aggregate_cpu "$dir" 2>/dev/null)"
+            ;;
+        *)
+            declare -F io_aggregate_offenders >/dev/null 2>&1 || return 0
+            rows="$(io_aggregate_offenders "$dir" 2>/dev/null)"
+            ;;
+    esac
+    [[ -n "$rows" ]] || return 0
+
+    local pid comm total
+    while IFS=$'\t' read -r pid comm _ _ total _ _ _; do
+        [[ -n "$pid" ]] || continue
+        [[ "$pid" == "1" ]] && continue
+        [[ -n "$comm" && "$comm" != "?" ]] || continue
+        printf '%s\t%s\t%s\n' "$comm" "$total" "$pid"
+        return 0
+    done <<<"$rows"
+
+    return 0
+}
+
+# True when PID 1 leads the I/O ranking, so the report can say why that is not
+# an accusation.
+analysis_pid1_leads_io() {
+    local dir="$1"
+    local top
+
+    declare -F io_aggregate_offenders >/dev/null 2>&1 || return 1
+    top="$(io_aggregate_offenders "$dir" 2>/dev/null | head -n 1)"
+    [[ -n "$top" ]] || return 1
+    [[ "${top%%$'\t'*}" == "1" ]]
+}
+
 # --- window statistics -------------------------------------------------------
 
 # Parses current.log for the samples inside the incident window and sets globals
@@ -446,15 +492,33 @@ analysis_classify() {
         fi
     fi
 
-    # The measured I/O leader, used the same way.
+    # The measured I/O leader, excluding PID 1 for the reason documented on
+    # analysis_top_measured_real.
     SF_TOP_IO_COMM=""
     SF_TOP_IO_KBS=0
     SF_TOP_IO_PID=""
+    SF_PID1_LEADS_IO=0
+    analysis_pid1_leads_io "$dir" && SF_PID1_LEADS_IO=1
     local io_row
-    io_row="$(analysis_top_measured "$dir" io)"
+    io_row="$(analysis_top_measured_real "$dir" io)"
     if [[ -n "$io_row" ]]; then
         IFS=$'\t' read -r SF_TOP_IO_COMM SF_TOP_IO_KBS SF_TOP_IO_PID <<<"$io_row"
         SF_EVIDENCE+=("top I/O process '${SF_TOP_IO_COMM}' (pid ${SF_TOP_IO_PID}) at ${SF_TOP_IO_KBS} kB/s")
+    fi
+    if [[ "$SF_PID1_LEADS_IO" -eq 1 ]]; then
+        SF_EVIDENCE+=("PID 1 (init) led the I/O ranking — it writes on behalf of other services (journal, unit state), so this is delegated activity and not a cause; see the PID 1 note in io-*.log")
+    fi
+
+    # --- distributed load: no single PID explains the spike -------------------
+    # Without this, a worker-pool incident reads as "nothing was using the CPU"
+    # because the largest single process is small.
+    SF_DISTRIBUTED=0
+    if declare -F agg_distributed_notice >/dev/null 2>&1; then
+        if agg_distributed_notice "$cpu_show" "${SF_TOP_CPU_PCT:-0}" >/dev/null 2>&1; then
+            SF_DISTRIBUTED=1
+            sf_add "CPU saturation" 15
+            SF_EVIDENCE+=("CPU usage is distributed across multiple processes; inspect aggregated executable totals rather than individual PIDs")
+        fi
     fi
 
     # --- where is the block? wait channel is the strongest signal -------------
@@ -878,6 +942,65 @@ analysis_verdict_tiers() {
     [[ "$unknown" -eq 1 ]] || printf '  - (none)\n'
 }
 
+# Combined-by-executable and by-subsystem totals. This is the view that names a
+# worker-pool cause: fourteen lsphp workers at 26% each are invisible in a
+# PID-ranked table but obvious as one aggregated row.
+analysis_aggregate_section() {
+    local dir="$1"
+    local cpu_tsv io_tsv combined
+
+    if ! declare -F agg_combine >/dev/null 2>&1; then
+        return 0
+    fi
+
+    cpu_tsv="$(mktemp 2>/dev/null)" || return 0
+    io_tsv="$(mktemp 2>/dev/null)" || {
+        rm -f -- "$cpu_tsv"
+        return 0
+    }
+
+    io_aggregate_cpu "$dir" 2>/dev/null >"$cpu_tsv" || true
+    io_aggregate_offenders "$dir" 2>/dev/null >"$io_tsv" || true
+
+    combined="$(agg_combine "$cpu_tsv" "$io_tsv" 2>/dev/null)"
+    rm -f -- "$cpu_tsv" "$io_tsv" 2>/dev/null || true
+
+    printf 'Combined by executable (aggregated across all processes):\n'
+    if [[ -z "$combined" ]]; then
+        printf '  (no per-process attribution captured for this incident)\n'
+        return 0
+    fi
+    printf '%s\n' "$combined" | agg_render_combined | sed 's/^/  /'
+
+    printf '\nCombined by subsystem:\n'
+    printf '%s\n' "$combined" | agg_rollup | agg_render_rollup | sed 's/^/  /'
+}
+
+# The pre-incident run-up, reconstructed from the process ring buffer. This is
+# the window the panic samplers structurally cannot reach: load1 lags, so by the
+# time panic mode starts sampling, a sub-minute burst is already collapsing.
+analysis_runup_section() {
+    local dir="$1"
+    local start end
+
+    declare -F ring_render_runup >/dev/null 2>&1 || return 0
+
+    start="$(incident_meta_get "$dir" started_epoch 0)"
+    end="$(incident_meta_get "$dir" ended_epoch 0)"
+    [[ "$start" -gt 0 ]] || return 0
+
+    printf 'Run-up (process ring buffer, before and during the incident):\n'
+    ring_render_runup "$start" "$end"
+
+    local peak
+    peak="$(ring_window_by_exec "$start" "$end" 2>/dev/null | head -n 5)"
+    if [[ -n "$peak" ]]; then
+        printf '\n  Peak concurrency by executable during the run-up:\n'
+        printf '%s\n' "$peak" | awk -F'\t' \
+            '{ printf "    %-18.18s peak_procs=%-5d peak_cpu=%-8.1f samples=%d\n", $1, $2, $3, $4 }'
+    fi
+}
+
 # Reconstructs how the incident evolved from the current.log samples in the
 # window, one compact row per sample with annotated transitions.
 analysis_timeline() {
@@ -1140,6 +1263,11 @@ analysis_generate() {
         printf 'LIKELY CAUSE: %s (%s%%)\n' "$SF_LEADER" "$SF_LEADER_PCT"
         printf 'Mechanism:    blocked (uninterruptible) tasks (%s%%)\n' "${SF_PCT[$SF_MECH]}"
         printf '========================================\n'
+        if [[ "${SF_DISTRIBUTED:-0}" -eq 1 ]]; then
+            printf '\n'
+            printf 'NOTE: CPU usage is distributed across multiple processes; inspect\n'
+            printf '      aggregated executable totals rather than individual PIDs.\n'
+        fi
         printf '\n'
 
         printf '%s\n' '-- Observed facts (measured, no interpretation) --'
@@ -1149,14 +1277,32 @@ analysis_generate() {
         printf '  - Peak D-state processes: %s\n' "$W_MAX_DSTATE"
         printf '  - Lowest Apache workers: %s\n' "$W_MIN_APACHE"
         printf '  - Lowest MariaDB threads running: %s\n' "$W_MIN_DBTHR"
-        printf '  - Top CPU process: %s (pid %s) at %s%%\n' \
-            "$(incident_meta_get "$dir" peak_cpu_comm none)" \
-            "$(incident_meta_get "$dir" peak_cpu_pid none)" \
-            "$(incident_meta_get "$dir" peak_cpu_pct 0)"
-        printf '  - Top I/O process: %s (pid %s) at %s kB/s\n' \
-            "$(incident_meta_get "$dir" peak_io_comm none)" \
-            "$(incident_meta_get "$dir" peak_io_pid none)" \
-            "$(incident_meta_get "$dir" peak_io_kbs 0)"
+        # Prefer the meta peaks recorded live during the incident, but fall back
+        # to the values re-derived from the offender tables. Without the
+        # fallback this block contradicts the Inference block below whenever the
+        # meta is absent — for an incident closed by an older build, or one whose
+        # analysis is regenerated after the fact.
+        local of_comm of_pid of_val
+        of_comm="$(incident_meta_get "$dir" peak_cpu_comm none)"
+        of_pid="$(incident_meta_get "$dir" peak_cpu_pid none)"
+        of_val="$(incident_meta_get "$dir" peak_cpu_pct 0)"
+        if [[ "$of_comm" == none && -n "${SF_TOP_CPU_COMM:-}" ]]; then
+            of_comm="$SF_TOP_CPU_COMM"
+            of_pid="$SF_TOP_CPU_PID"
+            of_val="$SF_TOP_CPU_PCT"
+        fi
+        printf '  - Top CPU process: %s (pid %s) at %s%%\n' "$of_comm" "$of_pid" "$of_val"
+
+        of_comm="$(incident_meta_get "$dir" peak_io_comm none)"
+        of_pid="$(incident_meta_get "$dir" peak_io_pid none)"
+        of_val="$(incident_meta_get "$dir" peak_io_kbs 0)"
+        if [[ "$of_comm" == none && -n "${SF_TOP_IO_COMM:-}" ]]; then
+            of_comm="$SF_TOP_IO_COMM"
+            of_pid="$SF_TOP_IO_PID"
+            of_val="$SF_TOP_IO_KBS"
+        fi
+        printf '  - Top I/O process: %s (pid %s) at %s kB/s%s\n' "$of_comm" "$of_pid" "$of_val" \
+            "$([[ "${SF_PID1_LEADS_IO:-0}" -eq 1 ]] && printf ' (PID 1 excluded: delegated writes)' || printf '')"
         if [[ "$SF_PSI_PRESENT" -eq 1 ]]; then
             printf '  - PSI io full avg10 (peak): %s\n' "$(incident_meta_get "$dir" peak_psi_io_full 0)"
             printf '  - PSI cpu some avg10 (peak): %s\n' "$(incident_meta_get "$dir" peak_psi_cpu_some 0)"
@@ -1175,6 +1321,12 @@ analysis_generate() {
         else
             printf '  - insufficient forensic detail was captured\n'
         fi
+        printf '\n'
+
+        analysis_aggregate_section "$dir"
+        printf '\n'
+
+        analysis_runup_section "$dir"
         printf '\n'
 
         analysis_ledger "$dir"

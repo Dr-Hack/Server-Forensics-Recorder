@@ -14,6 +14,8 @@ source "${ROOT_DIR}/lib/plugins.sh"
 source "${ROOT_DIR}/lib/metrics.sh"
 # shellcheck source=../lib/incident.sh
 source "${ROOT_DIR}/lib/incident.sh"
+# shellcheck source=../lib/procring.sh
+source "${ROOT_DIR}/lib/procring.sh"
 
 main() {
     log_init
@@ -22,9 +24,19 @@ main() {
     line="$(collect_metrics_line)"
     printf '%s\n' "$line" >>"$CURRENT_LOG"
 
+    # Record the pre-incident process picture on every cycle. This is what the
+    # analysis reads backwards into when a spike is over before panic mode can
+    # sample it. It never evaluates thresholds, so it cannot change when an
+    # incident is declared.
+    ring_tick || log_debug "ring sample skipped"
+
     if ! reason="$(metrics_unhealthy_reason "$line")"; then
         log_debug "server healthy"
         "${SCRIPT_DIR}/rotate.sh" >/dev/null 2>&1 || log_warn "rotation failed"
+        # Spend the rest of the interval polling /proc/loadavg cheaply, taking a
+        # full sample only while load is elevated, so a burst that starts and
+        # finishes between timer ticks still leaves a trace.
+        ring_poll_window || log_debug "ring poll window ended early"
         return 0
     fi
 

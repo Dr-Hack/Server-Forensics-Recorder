@@ -143,6 +143,65 @@ The incident's worst offender is retained as `peak_io_pid`, `peak_io_comm` and
 `peak_io_kbs`, printed in `summary.txt`, and viewable with
 `server-forensics --offenders`. The raw capture is `server-forensics --io`.
 
+## Pre-Incident Process Ring Buffer
+
+```bash
+ENABLE_PROC_RING=1
+RINGBUFFER_RETAIN_SECONDS=900
+RINGBUFFER_LOOKBACK_SECONDS=300
+RINGBUFFER_TOP_EXECS=15
+RINGBUFFER_TOP_PIDS=10
+RINGBUFFER_POLL=1
+RINGBUFFER_POLL_INTERVAL=10
+RINGBUFFER_FAST_INTERVAL=10
+RINGBUFFER_FAST_LOAD=3
+RINGBUFFER_POLL_WINDOW=45
+```
+
+Panic mode is triggered by `load1`, a one-minute average that **lags** the work
+causing it. A burst shorter than the collector interval is therefore always
+sampled on its way down, and the per-process tables describe the recovery rather
+than the event. No trigger fixes this: if the first per-process measurement
+happens after the trigger, the burst is already over. The ring samples
+continuously so the analysis can look **backwards**.
+
+- `ENABLE_PROC_RING`: Record a compact per-executable snapshot each cycle. The
+  ring **never declares an incident** — enabling it cannot change when panic mode
+  fires.
+- `RINGBUFFER_RETAIN_SECONDS`, `RINGBUFFER_LOOKBACK_SECONDS`: History kept, and
+  how far before an incident's start the analysis reads back. Measured footprint
+  is ~2.5 KB per sample: about 37 KB of 15-minute history on an idle server and
+  223 KB at the maximum sampling rate.
+- `RINGBUFFER_POLL`, `RINGBUFFER_POLL_INTERVAL`, `RINGBUFFER_FAST_LOAD`: Between
+  timer ticks the watcher polls `/proc/loadavg` — a single small read — every
+  `POLL_INTERVAL` seconds, and takes a full `ps` sample only while load1 exceeds
+  `FAST_LOAD`. Steady-state cost on an idle server is one `ps` per minute.
+  `FAST_LOAD` is deliberately far below `LOAD_THRESHOLD`: the point is to already
+  be sampling quickly by the time the panic threshold is crossed.
+- `RINGBUFFER_POLL_WINDOW`: How long the watcher keeps polling after a healthy
+  cycle. Validated to be less than `INTERVAL` so the next timer tick is never
+  delayed.
+
+The systemd timer uses `OnUnitActiveSec=60` rather than `OnUnitInactiveSec=60`,
+because the latter counts from when the service *finishes* and would stretch the
+metric cadence to poll-window + 60s.
+
+View it with `server-forensics --runup [ID]` for an incident, or
+`server-forensics --ring [N]` for the live buffer.
+
+## Distributed-Load Notice
+
+```bash
+AGG_DISTRIBUTED_CPU_PCT=90
+AGG_DISTRIBUTED_TOP_PCT=15
+```
+
+When the machine is busier than `AGG_DISTRIBUTED_CPU_PCT` but no single process
+reaches `AGG_DISTRIBUTED_TOP_PCT`, the report states that usage is spread across
+processes and points at the aggregated executable totals. Without it, a
+worker-pool spike — 93% CPU with a 9% top process — reads as though nothing was
+using the CPU.
+
 ## Collector Controls
 
 ```bash

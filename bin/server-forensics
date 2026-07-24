@@ -27,8 +27,12 @@ source "${ROOT_DIR}/lib/metrics.sh"
 source "${ROOT_DIR}/lib/incident.sh"
 # shellcheck source=../lib/analysis.sh
 source "${ROOT_DIR}/lib/analysis.sh"
+# shellcheck source=../lib/aggregate.sh
+source "${ROOT_DIR}/lib/aggregate.sh"
 # shellcheck source=../lib/ioforensics.sh
 source "${ROOT_DIR}/lib/ioforensics.sh"
+# shellcheck source=../lib/procring.sh
+source "${ROOT_DIR}/lib/procring.sh"
 
 usage() {
     cat <<'USAGE'
@@ -48,6 +52,10 @@ Commands:
                     disk read+write) for incident ID, or the latest incident.
   --io [ID]         Print the full I/O attribution capture (pidstat, iostat, PSI,
                     diskstats, mounts, per-offender /proc detail) for an incident.
+  --runup [ID]      Print the pre-incident process ring buffer for an incident —
+                    what was building up before the trigger fired.
+  --ring [N]        Print the last N seconds of the live process ring buffer
+                    (default 300), independent of any incident.
   --test-panic      Create and close a safe test incident without expensive diagnostics.
   --watch           Run one watcher cycle.
   --collect         Run one collector cycle.
@@ -383,6 +391,26 @@ cmd_offenders() {
         return 0
     fi
 
+    # Aggregation leads: for worker-pool workloads the per-PID tables understate
+    # the cause badly (fourteen lsphp at 26% each looks like nothing).
+    local cf iof combined
+    cf="$(mktemp 2>/dev/null || true)"
+    iof="$(mktemp 2>/dev/null || true)"
+    if [[ -n "$cf" && -n "$iof" ]]; then
+        printf '%s\n' "$cputsv" >"$cf"
+        printf '%s\n' "$tsv" >"$iof"
+        combined="$(agg_combine "$cf" "$iof" 2>/dev/null)"
+        rm -f -- "$cf" "$iof" 2>/dev/null || true
+
+        if [[ -n "$combined" ]]; then
+            printf -- '-- Combined by executable --\n'
+            printf '%s\n' "$combined" | agg_render_combined
+            printf '\n-- Combined by subsystem --\n'
+            printf '%s\n' "$combined" | agg_rollup | agg_render_rollup
+            printf '\n'
+        fi
+    fi
+
     # CPU first: most spikes on this box are compute-bound, and reading the CPU
     # table first stops a quiet disk from looking like the whole story.
     printf -- '-- Ranked by CPU --\n'
@@ -424,6 +452,62 @@ cmd_io() {
     cat "${logs[@]}"
 }
 
+# What was building up BEFORE the trigger fired. load1 lags, so this is the
+# window the panic samplers structurally cannot reach.
+cmd_runup() {
+    local dir start end
+    dir="$(resolve_incident "${1:-}")" || return 1
+
+    if [[ -z "$dir" ]]; then
+        printf 'no incidents recorded\n'
+        return 0
+    fi
+
+    start="$(incident_meta_get "$dir" started_epoch 0)"
+    end="$(incident_meta_get "$dir" ended_epoch 0)"
+
+    printf 'incident-dir=%s\n' "$dir"
+    printf 'lookback=%ss before start\n\n' "${RINGBUFFER_LOOKBACK_SECONDS:-300}"
+
+    if [[ "$start" -le 0 ]]; then
+        printf 'incident has no recorded start epoch\n' >&2
+        return 1
+    fi
+
+    printf 'Run-up timeline:\n'
+    ring_render_runup "$start" "$end"
+
+    printf '\nPeak concurrency by executable:\n'
+    ring_window_by_exec "$start" "$end" | head -n 15 | awk -F'\t' \
+        '{ printf "  %-18.18s peak_procs=%-5d peak_cpu=%-8.1f samples=%d\n", $1, $2, $3, $4 }'
+}
+
+# The live ring, independent of any incident — useful for confirming the buffer
+# is actually sampling before an incident needs it.
+cmd_ring() {
+    local seconds="${1:-300}"
+    local file now
+
+    if ! is_uint "$seconds"; then
+        printf 'ring lookback must be a non-negative integer: %s\n' "$seconds" >&2
+        return 2
+    fi
+
+    file="$(ring_file)"
+    if [[ ! -s "$file" ]]; then
+        printf 'process ring buffer is empty: %s\n\n' "$file"
+        printf 'Likely causes:\n'
+        printf '  - ENABLE_PROC_RING=0 in the config\n'
+        printf '  - the watcher has not run since this version was installed\n'
+        return 0
+    fi
+
+    now="$(now_epoch)"
+    printf 'ring-file=%s\n' "$file"
+    printf 'window=last %ss\n\n' "$seconds"
+    ring_render_runup "$((now - seconds))" "$now"
+}
+
 cmd_test_panic() {
     "${ROOT_DIR}/scripts/panic.sh" --test-panic
 }
@@ -462,6 +546,12 @@ main() {
             ;;
         --io)
             cmd_io "${2:-}"
+            ;;
+        --runup)
+            cmd_runup "${2:-}"
+            ;;
+        --ring)
+            cmd_ring "${2:-300}"
             ;;
         --test-panic)
             cmd_test_panic
