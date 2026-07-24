@@ -65,19 +65,56 @@ ring_sample() {
     # kept separate: ring_format is fed real captured `ps` output by the test
     # suite. A parser that can only be exercised on the target host is a parser
     # that ships broken — see docs/decisions.md.
-    ps -eo pid=,comm=,pcpu=,rss=,stat= 2>/dev/null | ring_format >>"$file" 2>/dev/null || return 0
+    #
+    # `args=` is captured LAST because it is the only variable-width field: fields
+    # 1-5 stay fixed-position and everything from field 6 on is the command line.
+    # It carries the mod_lsapi worker's rewritten argv ("lsphp:<script>"), which is
+    # the ONLY place the PHP endpoint is visible — pidstat and comm both show a
+    # bare "lsphp". On a single-account box the endpoint is the actionable unit.
+    ps -eo pid=,comm=,pcpu=,rss=,stat=,args= 2>/dev/null | ring_format >>"$file" 2>/dev/null || return 0
 
     return 0
 }
 
-# Parses `ps -eo pid=,comm=,pcpu=,rss=,stat=` on stdin into ring lines.
+# Parses `ps -eo pid=,comm=,pcpu=,rss=,stat=,args=` on stdin into ring lines.
+# Fields 1-5 are fixed; field 6 onward is the command line (args=), which is
+# optional — captured input without it (older fixtures) simply yields no PHP rows.
 ring_format() {
-    local now top_execs top_pids
+    local now top_execs top_pids top_php
     now="$(now_epoch)"
     top_execs="${RINGBUFFER_TOP_EXECS:-15}"
     top_pids="${RINGBUFFER_TOP_PIDS:-10}"
+    top_php="${RINGBUFFER_TOP_PHP:-10}"
 
-    awk -v now="$now" -v iso="$(now_iso)" -v nexec="$top_execs" -v npid="$top_pids" '
+    awk -v now="$now" -v iso="$(now_iso)" -v nexec="$top_execs" -v npid="$top_pids" -v nphp="$top_php" '
+        # Extracts a stable PHP endpoint key from a worker command line. mod_lsapi
+        # rewrites argv to "lsphp:<script path>" and overwrites it IN PLACE, so a
+        # long path is FRONT-truncated ("ackne/site.com/wp-admin/admin-post.php").
+        # The tail is always intact, so the key is the last two path components:
+        # meaningful ("wp-admin/admin-post.php") and stable across truncation.
+        # Returns "" for anything that is not actively serving a .php script
+        # (idle "lsphp" workers, non-PHP processes).
+        function php_endpoint(args,   n, w, i, tok, script, base, rest, parent) {
+            gsub(/lsphp:/, " ", args)
+            gsub(/php-fpm:/, " ", args)
+            n = split(args, w, /[ \t]+/)
+            script = ""
+            for (i = 1; i <= n; i++) {
+                tok = w[i]
+                sub(/\?.*$/, "", tok)          # drop any query string
+                if (tok ~ /\.php$/) script = tok
+            }
+            if (script == "") return ""
+            base = script
+            sub(/.*\//, "", base)              # basename
+            rest = script
+            if (sub(/\/[^\/]*$/, "", rest) && rest != "") {
+                parent = rest
+                sub(/.*\//, "", parent)
+                if (parent != "") return parent "/" base
+            }
+            return base
+        }
         {
             pid = $1; comm = $2; cpu = $3 + 0; rss = $4 + 0; st = $5
             if (pid == "" || comm == "") next
@@ -89,6 +126,15 @@ ring_format() {
             erss[key] += rss
             eproc[key]++
             if (st ~ /^D/) edstate[key]++
+
+            # Attribute PHP workers to the endpoint they are serving, when args
+            # carries it. Everything from field 6 on is the command line.
+            if (NF >= 6) {
+                args = ""
+                for (i = 6; i <= NF; i++) args = args (i > 6 ? " " : "") $i
+                ep = php_endpoint(args)
+                if (ep != "") { phpcpu[ep] += cpu; phpproc[ep]++ }
+            }
 
             # Track the heaviest individual PIDs for the runaway case.
             np++
@@ -122,6 +168,20 @@ ring_format() {
                 if (pcpu[a] <= 0) break
                 printf "ts=%s iso=%s kind=pid pid=%s comm=%s cpu=%.2f rss_mb=%.1f\n", \
                     now, iso, ppid[a], pcomm[a], pcpu[a], prss[a] / 1024.0
+            }
+
+            # PHP endpoint rows, highest CPU first, capped. These name the request
+            # behind the load on a single-account box, where by-executable is blind.
+            m = 0
+            for (k in phpcpu) { m++; hord[m] = k }
+            for (a = 1; a <= m; a++)
+                for (b = a + 1; b <= m; b++)
+                    if (phpcpu[hord[b]] > phpcpu[hord[a]]) { t = hord[a]; hord[a] = hord[b]; hord[b] = t }
+            hlim = (m < nphp ? m : nphp)
+            for (a = 1; a <= hlim; a++) {
+                k = hord[a]
+                printf "ts=%s iso=%s kind=php script=%s procs=%d cpu=%.2f\n", \
+                    now, iso, k, phpproc[k], phpcpu[k]
             }
         }
     '
@@ -225,6 +285,27 @@ ring_window_by_exec() {
             n[comm]++
         }
         END { for (c in n) printf "%s\t%d\t%.2f\t%d\n", c, maxp[c], maxc[c], n[c] }
+    ' | sort -t"$(printf '\t')" -k3,3 -rn
+}
+
+# Aggregates the run-up window by PHP endpoint, so "which request was building"
+# is answerable directly on a single-account box:
+#   script <TAB> peak_procs <TAB> peak_cpu <TAB> samples
+ring_window_by_php() {
+    ring_window "$1" "${2:-}" | awk '
+        $0 ~ /kind=php/ {
+            script = ""; procs = 0; cpu = 0
+            for (i = 1; i <= NF; i++) {
+                if (index($i, "script=") == 1)     { script = substr($i, 8) }
+                else if (index($i, "procs=") == 1) { procs = substr($i, 7) + 0 }
+                else if (index($i, "cpu=") == 1)   { cpu = substr($i, 5) + 0 }
+            }
+            if (script == "") next
+            if (procs > maxp[script]) maxp[script] = procs
+            if (cpu > maxc[script]) maxc[script] = cpu
+            n[script]++
+        }
+        END { for (s in n) printf "%s\t%d\t%.2f\t%d\n", s, maxp[s], maxc[s], n[s] }
     ' | sort -t"$(printf '\t')" -k3,3 -rn
 }
 

@@ -480,6 +480,14 @@ cmd_runup() {
     printf '\nPeak concurrency by executable:\n'
     ring_window_by_exec "$start" "$end" | head -n 15 | awk -F'\t' \
         '{ printf "  %-18.18s peak_procs=%-5d peak_cpu=%-8.1f samples=%d\n", $1, $2, $3, $4 }'
+
+    local php
+    php="$(ring_window_by_php "$start" "$end" 2>/dev/null | head -n 15)"
+    if [[ -n "$php" ]]; then
+        printf '\nHot PHP endpoints (script the workers were serving):\n'
+        printf '%s\n' "$php" | awk -F'\t' \
+            '{ printf "  %-40.40s peak_procs=%-5d peak_cpu=%-8.1f samples=%d\n", $1, $2, $3, $4 }'
+    fi
 }
 
 # The live ring, independent of any incident — useful for confirming the buffer

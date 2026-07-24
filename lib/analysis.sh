@@ -999,6 +999,18 @@ analysis_runup_section() {
         printf '%s\n' "$peak" | awk -F'\t' \
             '{ printf "    %-18.18s peak_procs=%-5d peak_cpu=%-8.1f samples=%d\n", $1, $2, $3, $4 }'
     fi
+
+    # On a single-account box "lsphp" names nothing; the endpoint does. When the
+    # ring caught the workers' rewritten argv, this is the request behind the load.
+    local php
+    if declare -F ring_window_by_php >/dev/null 2>&1; then
+        php="$(ring_window_by_php "$start" "$end" 2>/dev/null | head -n 8)"
+    fi
+    if [[ -n "$php" ]]; then
+        printf '\n  Hot PHP endpoints during the run-up (script the workers were serving):\n'
+        printf '%s\n' "$php" | awk -F'\t' \
+            '{ printf "    %-40.40s peak_procs=%-5d peak_cpu=%-8.1f samples=%d\n", $1, $2, $3, $4 }'
+    fi
 }
 
 # Reconstructs how the incident evolved from the current.log samples in the

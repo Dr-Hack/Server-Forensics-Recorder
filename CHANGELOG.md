@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.4.0 — 2026-07-25
+
+The recorder could prove "PHP saturated the box" but not *which request* did it.
+On a single-account dedicated host that is the whole question — every worker is
+named `lsphp` and owned by the one account, so both per-executable and per-user
+views are blind. This release attributes the load to the endpoint.
+
+### Added
+
+- **PHP endpoint attribution.** The process ring buffer now captures each
+  worker's command line (`ps ... args=`). Under Apache mod_lsapi the worker's
+  argv is rewritten to `lsphp:<script path>`, which is the only place the served
+  script is visible — `pidstat` and `comm` both show a bare `lsphp`. The ring
+  parses that into a stable endpoint key (the last two path components, so a
+  front-truncated `…ackne/site.com/wp-admin/admin-post.php` still aggregates
+  cleanly as `wp-admin/admin-post.php`) and ranks workers by endpoint.
+
+  On `incident-20260725-001537` — a sustained ~2h PHP saturation, load ~14, CPU
+  99.6% — the offender detail happened to catch a few workers on
+  `cryptoawaz.com/index.php`, `wp-admin/admin-post.php`, and
+  `wp-admin/admin-ajax.php`, but most had already exited. The ring samples
+  continuously and survives that churn, so the run-up now reports the hot
+  endpoints even when the workers are gone by panic time.
+
+  The analysis Run-up section and `--runup` gain a *Hot PHP endpoints* table;
+  idle workers and non-PHP processes are excluded; query strings do not split an
+  endpoint. Rows per sample are capped by `RINGBUFFER_TOP_PHP` (10).
+
 ## 0.3.0 — 2026-07-24
 
 The recorder measured the right things but arrived after the event, and ranked

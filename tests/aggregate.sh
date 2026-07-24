@@ -31,6 +31,7 @@ AGG_DISTRIBUTED_CPU_PCT=90
 AGG_DISTRIBUTED_TOP_PCT=15
 RINGBUFFER_RETAIN_SECONDS=900
 RINGBUFFER_LOOKBACK_SECONDS=300
+RINGBUFFER_TOP_PHP=10
 
 FAILURES=0
 pass() { printf '  ok   %s\n' "$1"; }
@@ -303,6 +304,80 @@ RINGBUFFER_TOP_PIDS=10
 # Empty input must not produce junk.
 empty_parsed="$(printf '' | ring_format || printf 'ERRORED')"
 assert_eq "${empty_parsed:-none}" "none" "empty ps output yields no ring lines"
+
+# Five-field input (no args) must still parse and must not fabricate PHP rows.
+noargs="$(ring_format <"${WORK}/ps.txt")"
+if printf '%s\n' "$noargs" | grep -q 'kind=php'; then
+    fail "PHP rows must not appear when args were not captured"
+else
+    pass "absent args yields no PHP endpoint rows (backward compatible)"
+fi
+
+# --- PHP endpoint attribution -------------------------------------------------
+# The single-account production case: many lsphp workers, all named "lsphp", each
+# serving a different WordPress endpoint. mod_lsapi rewrites argv to
+# "lsphp:<script>" and front-truncates long paths; only the tail survives. Shape
+# of `ps -eo pid=,comm=,pcpu=,rss=,stat=,args=` on el8.
+printf 'PHP endpoint attribution\n'
+{
+    printf ' 589246 lsphp            80.0  31200 R lsphp:/home/drhackne/cryptoawaz.com/index.php\n'
+    printf ' 589236 lsphp            77.0  31000 R lsphp:ackne/cryptoawaz.com/wp-admin/admin-post.php\n'
+    printf ' 589245 lsphp            60.0  30000 R lsphp:kne/public_html/blog/wp-admin/admin-ajax.php\n'
+    printf ' 589250 lsphp            55.0  30000 R lsphp:kne/public_html/blog/wp-admin/admin-ajax.php?action=x\n'
+    printf ' 588652 lsphp             0.0  20000 S lsphp\n'
+    printf '  39327 mariadbd          3.4 220000 S /usr/sbin/mariadbd\n'
+    printf '      1 systemd           0.0   9240 S /usr/lib/systemd/systemd --system\n'
+} >"${WORK}/psargs.txt"
+
+php_parsed="$(ring_format <"${WORK}/psargs.txt")"
+assert_contains "$php_parsed" "kind=php" "PHP endpoint rows are emitted from args"
+
+index_row="$(printf '%s\n' "$php_parsed" | awk '/kind=php/ && /script=cryptoawaz.com\/index.php/')"
+assert_contains "$index_row" "cpu=80.00" "front-page endpoint keeps site/script and its CPU"
+
+ajax_row="$(printf '%s\n' "$php_parsed" | awk '/kind=php/ && /script=wp-admin\/admin-ajax.php /')"
+assert_contains "$ajax_row" "procs=2" "the two admin-ajax workers collapse to one endpoint despite front-truncation"
+assert_contains "$ajax_row" "cpu=115.00" "endpoint CPU sums its workers (60 + 55) and query strings do not split it"
+
+post_row="$(printf '%s\n' "$php_parsed" | awk '/kind=php/ && /script=wp-admin\/admin-post.php/')"
+assert_contains "$post_row" "cpu=77.00" "admin-post endpoint is attributed from a truncated path"
+
+first_php="$(printf '%s\n' "$php_parsed" | awk '/kind=php/ { print; exit }')"
+assert_contains "$first_php" "script=wp-admin/admin-ajax.php" "PHP rows are ordered by CPU (115 leads)"
+
+if printf '%s\n' "$php_parsed" | grep -q 'kind=php.*script=mariadbd'; then
+    fail "non-PHP processes must not become endpoints"
+else
+    pass "non-PHP processes are excluded from endpoint rows"
+fi
+if printf '%s\n' "$php_parsed" | awk '/kind=php/' | grep -qE 'script=lsphp( |$)'; then
+    fail "idle lsphp workers (no script) must not become an endpoint"
+else
+    pass "idle lsphp workers are excluded from endpoint rows"
+fi
+
+# Endpoint rows respect their cap.
+RINGBUFFER_TOP_PHP=1
+capped_php="$(ring_format <"${WORK}/psargs.txt")"
+assert_eq "$(printf '%s\n' "$capped_php" | grep -c 'kind=php')" "1" "PHP rows respect RINGBUFFER_TOP_PHP"
+RINGBUFFER_TOP_PHP=10
+
+# Run-up aggregation by endpoint: peak concurrency and summed samples.
+printf 'PHP run-up aggregation\n'
+PNOW=1784900000
+{
+    printf 'ts=%s iso=2026-07-25T00:13:40+0500 kind=php script=wp-admin/admin-ajax.php procs=4 cpu=200.00\n' "$((PNOW - 120))"
+    printf 'ts=%s iso=2026-07-25T00:14:55+0500 kind=php script=wp-admin/admin-ajax.php procs=9 cpu=440.00\n' "$((PNOW - 40))"
+    printf 'ts=%s iso=2026-07-25T00:14:55+0500 kind=php script=cryptoawaz.com/index.php procs=2 cpu=90.00\n' "$((PNOW - 40))"
+    printf 'ts=%s iso=2026-07-25T00:40:00+0500 kind=php script=wp-admin/admin-ajax.php procs=1 cpu=5.00\n' "$((PNOW + 3000))"
+} >"$RING"
+
+by_php="$(ring_window_by_php "$PNOW" "$((PNOW + 60))")"
+ajax_agg="$(printf '%s\n' "$by_php" | awk -F'\t' '$1=="wp-admin/admin-ajax.php"')"
+assert_eq "$(printf '%s' "$ajax_agg" | cut -f2)" "9" "run-up endpoint peak concurrency is the maximum"
+assert_eq "$(printf '%s' "$ajax_agg" | cut -f3)" "440.00" "run-up endpoint peak CPU is retained"
+assert_eq "$(printf '%s' "$ajax_agg" | cut -f4)" "2" "run-up endpoint sample count excludes post-incident samples"
+assert_eq "$(printf '%s\n' "$by_php" | head -n 1 | cut -f1)" "wp-admin/admin-ajax.php" "run-up endpoints ordered by CPU"
 
 # The accelerate check must read load without failing on an odd environment.
 printf 'ring acceleration check\n'
