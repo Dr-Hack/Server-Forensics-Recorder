@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.5.0 — 2026-07-27
+
+### Added
+
+- **Host + URI request table in `--requests`.** WordPress with pretty permalinks
+  runs every front-end request through `index.php`, so the per-endpoint view
+  collapses `/checkout`, `/product/…`, and search into one row. The access log
+  still carries the real URI, so `--requests` now leads with a **host + URI**
+  table (per vhost, ranked by request count) — turning "cryptoawaz.com/index.php"
+  into the actual pages behind the load, which lets checkout, bot, search,
+  product, and API traffic be told apart.
+
+  Per-URI *CPU* is deliberately not shown: with pretty permalinks it cannot be
+  attributed (mod_lsapi does not expose the request URI to the process table).
+  Instead the table adds an **average-response-time** column when the domlog
+  `LogFormat` includes `%D` (request microseconds appended after the user agent);
+  when it does not, the table prints a one-line hint on enabling it and ranks by
+  request count alone. `web_filter_window` gained a best-effort trailing-`%D`
+  (7th) column; it is additive, so anything reading columns 1-6 is unaffected.
+
+  The cross-vhost path rollup is suppressed (`WEBLOG_SKIP_PATHS`) when the richer
+  host + URI table is shown, so the report does not print the same data twice; it
+  still appears in the standalone/fallback path. Covered by `tests/webforensics.sh`.
+
 ## 0.4.0 — 2026-07-25
 
 The recorder could prove "PHP saturated the box" but not *which request* did it.

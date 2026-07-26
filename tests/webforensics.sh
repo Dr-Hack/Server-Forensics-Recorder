@@ -166,6 +166,55 @@ assert_contains "$top_domain" "cryptoawaz.com" "the busiest vhost leads the per-
 assert_contains "$top_domain" "3" "per-domain count is correct"
 assert_contains "$DOMAINS" "cryptocurrencypakistan.org" "the quieter vhost is still listed"
 
+# --- response-time (%D) extraction --------------------------------------------
+# The 7th column is the request duration when the LogFormat appends %D after the
+# user agent, and 0 otherwise. Must not disturb columns 1-6.
+printf 'response-time extraction\n'
+cat >"${WORK}/timed.log" <<'LOG'
+203.0.113.9 - - [25/Jul/2026:00:15:00 +0500] "GET /checkout HTTP/1.1" 200 900 "-" "curl/8.0" 41000
+203.0.113.9 - - [25/Jul/2026:00:15:01 +0500] "GET /plain HTTP/1.1" 200 900 "-" "curl/8.0"
+LOG
+TIMED="$(web_filter_window 20260725001400 20260725002000 <"${WORK}/timed.log")"
+assert_eq "$(printf '%s\n' "$TIMED" | awk -F'\t' '$5=="/checkout"{print $7}')" "41000" "%D duration is read from the trailing field"
+assert_eq "$(printf '%s\n' "$TIMED" | awk -F'\t' '$5=="/plain"{print $7}')" "0" "duration is 0 when the log has no %D"
+assert_eq "$(printf '%s\n' "$TIMED" | awk -F'\t' '$5=="/checkout"{print $6}')" "curl/8.0" "the new column does not shift the user-agent field"
+
+# --- host + URI table ---------------------------------------------------------
+# The granular view the enhancement is about: real URLs per vhost, with avg ms
+# when %D is present. Input is domain-tagged rows (8 cols incl. trailing dur).
+printf 'host + URI table (with timing)\n'
+{
+    printf 'cryptoawaz.com\t20260725001500\t203.0.113.9\t200\tGET\t/checkout\tua\t41000\n'
+    printf 'cryptoawaz.com\t20260725001501\t203.0.113.9\t200\tGET\t/checkout\tua\t39000\n'
+    printf 'cryptoawaz.com\t20260725001502\t203.0.113.9\t200\tGET\t/product/ledger\tua\t26000\n'
+    printf 'cryptocurrencypakistan.org\t20260725001503\t203.0.113.9\t200\tGET\t/\tua\t1000\n'
+} >"${WORK}/tagged_timed.tsv"
+HU="$(web_render_host_uri <"${WORK}/tagged_timed.tsv")"
+assert_contains "$HU" "HOST" "host+URI table has a header"
+assert_contains "$HU" "AVG_MS" "avg-ms column appears when %D is present"
+hu_top="$(printf '%s\n' "$HU" | awk 'NR>1 && NF {print; exit}')"
+assert_contains "$hu_top" "/checkout" "most-hit host+URI leads the table"
+assert_contains "$hu_top" "cryptoawaz.com" "the host is shown alongside the URI"
+assert_contains "$HU" "40.0" "avg ms is computed from %D microseconds ((41000+39000)/2/1000)"
+assert_contains "$HU" "/product/ledger" "distinct URIs on the same host are separate rows"
+
+printf 'host + URI table (no timing)\n'
+{
+    printf 'cryptoawaz.com\t20260725001500\t203.0.113.9\t200\tGET\t/checkout\tua\t0\n'
+    printf 'cryptoawaz.com\t20260725001501\t203.0.113.9\t200\tGET\t/\tua\t0\n'
+} >"${WORK}/tagged_notime.tsv"
+HU2="$(web_render_host_uri <"${WORK}/tagged_notime.tsv")"
+refute_contains "$HU2" "AVG_MS" "avg-ms column is omitted when the log has no %D"
+assert_contains "$HU2" "add %D" "a hint on enabling %D is shown when timing is absent"
+
+# --- path-table suppression ---------------------------------------------------
+printf 'path table suppression\n'
+SKIP="$(printf '%s\n' "$FILTERED" | WEBLOG_SKIP_PATHS=1 web_report)"
+refute_contains "$SKIP" "Top request paths" "WEBLOG_SKIP_PATHS suppresses the cross-vhost path rollup"
+assert_contains "$SKIP" "Top client IPs" "other report sections remain when the path rollup is suppressed"
+UNSKIP="$(printf '%s\n' "$FILTERED" | web_report)"
+assert_contains "$UNSKIP" "Top request paths" "the path rollup still shows by default (fallback / standalone use)"
+
 if [[ "$FAILURES" -gt 0 ]]; then
     printf 'webforensics tests: %s failure(s)\n' "$FAILURES" >&2
     exit 1

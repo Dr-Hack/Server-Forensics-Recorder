@@ -87,15 +87,61 @@ web_render_domain_counts() {
         | awk -F'\t' '{ printf "  %8d  %s\n", $1, $2 }'
 }
 
+# Renders the host + URI table (stdin: domain-tagged rows —
+# domain <TAB> stamp <TAB> ip <TAB> status <TAB> method <TAB> path <TAB> ua <TAB> dur).
+# This is the granular answer WordPress hides: with pretty permalinks every
+# front-end request executes index.php, so per-executable/endpoint views collapse
+# them — but the access log still carries the real URI (/checkout, /product/…).
+# Ranked by request count; adds an average-milliseconds column when the log
+# carried %D (dur>0), and otherwise prints a one-line hint on how to enable it.
+# Kept separate so it can be unit-tested with a fixture.
+web_render_host_uri() {
+    awk -F'\t' -v top="${WEBLOG_TOP_ROWS:-20}" '
+        {
+            key = $1 SUBSEP $6
+            if (!(key in cnt)) { dom[key] = $1; uri[key] = $6 }
+            cnt[key]++
+            dur[key] += ($8 + 0)
+            if (($8 + 0) > 0) havedur = 1
+        }
+        END {
+            n = 0
+            for (k in cnt) ord[++n] = k
+            for (a = 1; a <= n; a++)
+                for (b = a + 1; b <= n; b++)
+                    if (cnt[ord[b]] > cnt[ord[a]]) { t = ord[a]; ord[a] = ord[b]; ord[b] = t }
+
+            if (havedur)
+                printf "  %-26s %-40s %9s %9s\n", "HOST", "URI", "REQUESTS", "AVG_MS"
+            else
+                printf "  %-26s %-40s %9s\n", "HOST", "URI", "REQUESTS"
+
+            lim = (n < top ? n : top)
+            for (a = 1; a <= lim; a++) {
+                k = ord[a]
+                if (havedur)
+                    printf "  %-26.26s %-40.40s %9d %9.1f\n", dom[k], uri[k], cnt[k], (dur[k] / cnt[k]) / 1000.0
+                else
+                    printf "  %-26.26s %-40.40s %9d\n", dom[k], uri[k], cnt[k]
+            }
+            if (!havedur)
+                printf "  (response time unavailable — add %%D to the domlog LogFormat to rank by time)\n"
+        }
+    '
+}
+
 # Reads combined-format access-log lines on stdin and emits a normalised TSV for
 # those whose timestamp falls within [lo, hi], where lo/hi are sortable numeric
 # stamps YYYYMMDDHHMMSS. Comparing pre-formatted local time avoids any dependence
 # on gawk's mktime (absent on mawk/busybox) and on process timezone: the recorder
 # and the logs share one host, one clock.
 #
-# Output columns:  stamp <TAB> ip <TAB> status <TAB> method <TAB> path <TAB> ua
+# Output columns:  stamp <TAB> ip <TAB> status <TAB> method <TAB> path <TAB> ua <TAB> dur
 # The request/UA are lifted by splitting on the quote character, so leading fields
-# (a restored real IP, extra columns) cannot shift them.
+# (a restored real IP, extra columns) cannot shift them. `dur` is the request
+# duration if the LogFormat appends %D after the user-agent (0 otherwise); it is
+# a best-effort trailing-number read and the 7th column is additive, so anything
+# consuming columns 1-6 is unaffected.
 web_filter_window() {
     local lo="$1" hi="$2"
     awk -v lo="$lo" -v hi="$hi" '
@@ -130,7 +176,11 @@ web_filter_window() {
             if (path == "") path = "-"
             if (method == "") method = "-"
             if (status == "") status = "-"
-            printf "%s\t%s\t%s\t%s\t%s\t%s\n", stamp, ip, status, method, path, ua
+            # %D (request microseconds), if the LogFormat appended it after the UA
+            # quote. Best-effort: the first number in the post-UA remainder.
+            dur = 0
+            if (n >= 7) { tail = q[7]; if (match(tail, /[0-9]+/)) dur = substr(tail, RSTART, RLENGTH) + 0 }
+            printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", stamp, ip, status, method, path, ua, dur
         }
     '
 }
@@ -154,12 +204,18 @@ web_report() {
 
     printf 'Requests in window: %s\n\n' "$total"
 
-    printf 'Top request paths (by hits):\n'
-    printf '%s\n' "$rows" | awk -F'\t' '{ c[$5]++ } END { for (p in c) printf "%d\t%s\n", c[p], p }' \
-        | sort -rn | head -n "$top" \
-        | awk '{ printf "  %8d  %s\n", $1, $2 }'
+    # Suppressed when the caller already printed the richer host+URI table (which
+    # subsumes this cross-vhost path rollup). Kept for the fallback path and for
+    # direct/standalone use where no per-domain tagging exists.
+    if [[ -z "${WEBLOG_SKIP_PATHS:-}" ]]; then
+        printf 'Top request paths (by hits):\n'
+        printf '%s\n' "$rows" | awk -F'\t' '{ c[$5]++ } END { for (p in c) printf "%d\t%s\n", c[p], p }' \
+            | sort -rn | head -n "$top" \
+            | awk '{ printf "  %8d  %s\n", $1, $2 }'
+        printf '\n'
+    fi
 
-    printf '\nTop client IPs (by hits):\n'
+    printf 'Top client IPs (by hits):\n'
     # SF_SELF_IPS (newline/space-separated) marks the server's own addresses so a
     # self-request row is labelled benign rather than read as a client.
     printf '%s\n' "$rows" | awk -F'\t' '{ c[$2]++ } END { for (p in c) printf "%d\t%s\n", c[p], p }' \
@@ -276,7 +332,15 @@ web_capture() {
             printf 'Requests per domain (vhost):\n'
             web_render_domain_counts <"$tagged"
             printf '\n'
-            cut -f2- "$tagged" | web_report
+
+            # The granular view: real URLs per vhost (index.php resolved to the
+            # actual page). Subsumes web_report's cross-vhost path rollup, so
+            # WEBLOG_SKIP_PATHS suppresses that to avoid printing it twice.
+            printf 'Top requests (host + URI, by hits):\n'
+            web_render_host_uri <"$tagged"
+            printf '\n'
+
+            cut -f2- "$tagged" | WEBLOG_SKIP_PATHS=1 web_report
             rm -f -- "$tagged" 2>/dev/null || true
         else
             # No temp file available: fall back to the combined report without the

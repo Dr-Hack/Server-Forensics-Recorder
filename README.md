@@ -43,9 +43,11 @@ happened.
 >   `wp-admin/admin-ajax.php, 15 workers`, not `lsphp, 68000% CPU`.
 > - **Which URL and client IP.** At incident close the recorder reads the domain
 >   access logs (`/etc/apache2/logs/domlogs`), filters to the incident window,
->   and reports top request paths, top client IPs, and WordPress abuse-endpoint
->   tallies (`xmlrpc.php`, `wp-login.php`, `admin-ajax.php`, `admin-post.php`,
->   `wp-cron.php`). See it with `server-forensics --requests`.
+>   and reports a **host + URI** table (the real pages behind `index.php` — so
+>   `/checkout`, `/product/…`, and search are distinguished, not collapsed), top
+>   client IPs, and WordPress abuse-endpoint tallies (`xmlrpc.php`, `wp-login.php`,
+>   `admin-ajax.php`, `admin-post.php`, `wp-cron.php`). It adds average response
+>   time per URI when the log carries `%D`. See it with `server-forensics --requests`.
 > - **Cloudflare-aware.** When the busiest client IPs are Cloudflare edges the
 >   report says so and points at the `CF-Connecting-IP` header and Cloudflare's
 >   own controls — instead of fingering the CDN or suggesting a CSF ban that

@@ -2,7 +2,7 @@
 # Shared utility functions for server-forensics.
 # shellcheck disable=SC2034
 
-SERVER_FORENSICS_VERSION="0.4.0"
+SERVER_FORENSICS_VERSION="0.5.0"
 
 sf_root() {
     if [[ -n "${SF_ROOT:-}" ]]; then

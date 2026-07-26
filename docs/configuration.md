@@ -212,10 +212,21 @@ WEBLOG_ABUSE_ENDPOINTS="xmlrpc.php wp-login.php admin-ajax.php admin-post.php wp
 
 The endpoint names the script; the access log names the URL and the client IP.
 At incident close the recorder reads a bounded tail of the domain access logs,
-filters to the incident window, and writes `web.txt`: a per-vhost hit tally, top
-request paths, top client IPs, abuse-endpoint tallies, and top user agents. View
-it with `server-forensics --requests [ID]`, which regenerates on demand so it
-also works mid-incident.
+filters to the incident window, and writes `web.txt`: a per-vhost hit tally, a
+**host + URI** table, top client IPs, abuse-endpoint tallies, and top user
+agents. View it with `server-forensics --requests [ID]`, which regenerates on
+demand so it also works mid-incident.
+
+The **host + URI** table is the granular view: WordPress pretty permalinks route
+every front-end request through `index.php`, so the per-endpoint view collapses
+`/checkout`, `/product/…`, and search into one row — but the access log still
+carries the real URI, so this table shows the actual pages per vhost, ranked by
+request count. Per-URI CPU is not shown (mod_lsapi does not expose the request
+URI to the process table, so it cannot be attributed); instead the table adds an
+average-response-time column when the domlog `LogFormat` appends `%D` (request
+microseconds), and otherwise prints a one-line hint on enabling it. To enable
+timing, add `%D` to the end of the cPanel Apache `LogFormat` (a custom
+`Include`), e.g. `... \"%{User-Agent}i\" %D`.
 
 The client-IP table labels the **server's own addresses** — discovered at
 runtime from `hostname -I` / `ip addr`, never hardcoded — as loopback /
