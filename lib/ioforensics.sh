@@ -118,6 +118,29 @@ io_run_now() {
     return 0
 }
 
+# Captures the tail of the kernel ring buffer. Unlike io_run_now this needs a
+# tail (the interesting messages — OOM-killer, ext4/jbd2 journal errors, block/
+# virtio timeouts during the stall — are the most RECENT), so it is its own
+# helper. `--ctime` gives human timestamps; a build without it falls back to plain
+# dmesg. Restricted dmesg (dmesg_restrict) is reported, not fatal.
+io_capture_dmesg() {
+    local file="$1"
+    local lines="${PANIC_DMESG_LINES:-200}"
+    local tmo="${PANIC_IO_DETAIL_TIMEOUT:-5}"
+
+    io_header "$file" "dmesg (last ${lines}, kernel ring buffer)"
+    if ! command_exists dmesg; then
+        printf 'SKIPPED: command not found: dmesg\n' >>"$file"
+        return 0
+    fi
+
+    { run_with_timeout "$tmo" dmesg --ctime 2>/dev/null \
+        || run_with_timeout "$tmo" dmesg 2>/dev/null; } \
+        | tail -n "$lines" >>"$file" 2>/dev/null \
+        || printf '[unreadable — needs root or kernel.dmesg_restrict=0]\n' >>"$file"
+    return 0
+}
+
 # --- pidstat parsing ---------------------------------------------------------
 
 # Converts `pidstat -d -h` output into a ranked TSV, one row per PID:
@@ -534,9 +557,18 @@ capture_io_forensics() {
     io_header "$file" "/proc/diskstats"
     cat /proc/diskstats 2>/dev/null >>"$file" || printf '[unreadable]\n' >>"$file"
 
+    io_header "$file" "/proc/mounts"
+    cat /proc/mounts 2>/dev/null >>"$file" || printf '[unreadable]\n' >>"$file"
+
     io_run_now "$file" "mount" mount
-    io_run_now "$file" "findmnt" findmnt --real -o SOURCE,TARGET,FSTYPE,OPTIONS
+    # --real is unsupported on some el8 findmnt builds; without it we get all
+    # mounts (matching `mount`/`/proc/mounts` above), which is fine.
+    io_run_now "$file" "findmnt" findmnt -o SOURCE,TARGET,FSTYPE,OPTIONS
     io_run_now "$file" "findmnt -D (usage)" findmnt -D -o SOURCE,TARGET,FSTYPE,SIZE,USED,AVAIL,USE%
+
+    # Kernel ring buffer: OOM-killer, ext4/jbd2 journal errors, block/virtio
+    # timeouts. High-value now that memory pressure is trending up.
+    io_capture_dmesg "$file"
 
     io_wait_jobs
 

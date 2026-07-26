@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.5.1 — 2026-07-27
+
+### Added
+
+- **AJAX action in the request table.** `--requests` now preserves the `action`
+  parameter for `admin-ajax.php` / `admin-post.php`
+  (e.g. `admin-ajax.php?action=edd_download`), which names the plugin or feature
+  responsible instead of collapsing every AJAX call into one row. Only the
+  `action` is kept (ids and nonces are dropped, so the table does not explode by
+  unique query string). Caveat: this reads the log's query string, so only **GET**
+  actions appear — a POST action (WordPress `heartbeat` and most plugin AJAX)
+  lives in the request body, which Apache does not log.
+- **`dmesg` at incident close.** The I/O capture now includes the tail of the
+  kernel ring buffer (`PANIC_DMESG_LINES`, default 200) — surfacing OOM-killer
+  kills, ext4/jbd2 journal errors, and block/virtio timeouts during a stall, the
+  kernel-side evidence that `iostat`/`pidstat` miss when they arrive after
+  recovery. Also adds `/proc/mounts` alongside the existing `mount` capture.
+
+### Fixed
+
+- `findmnt --real` failed on el8 findmnt builds that do not support the flag
+  (`unrecognized option '--real'`); dropped it — the unfiltered output matches
+  `mount` / `/proc/mounts` anyway.
+
 ## 0.5.0 — 2026-07-27
 
 ### Added

@@ -172,7 +172,22 @@ web_filter_window() {
             # split on a single space collapses the leading blank, so " 200 1234 "
             # yields s[1]=status, s[2]=bytes.
             split(q[3], s, " "); status = s[1]
-            sub(/\?.*$/, "", path)                  # group by path, drop query
+            # For AJAX/admin endpoints, keep the `action` parameter — it names the
+            # plugin/feature responsible (e.g. admin-ajax.php?action=edd_download).
+            # Only GET actions reach the log (a POST action is in the body, which
+            # Apache does not record). Keep action ONLY, dropping ids/nonces, so
+            # the table does not explode by unique query string. Everything else
+            # drops the query entirely to keep path aggregation clean.
+            if (path ~ /(admin-ajax|admin-post)\.php\?/) {
+                query = path; sub(/^[^?]*\?/, "", query)
+                base = path;  sub(/\?.*$/, "", base)
+                action = ""
+                mq = split(query, kv, "&")
+                for (j = 1; j <= mq; j++) if (kv[j] ~ /^action=/) { action = kv[j]; break }
+                path = (action != "" ? base "?" action : base)
+            } else {
+                sub(/\?.*$/, "", path)
+            }
             if (path == "") path = "-"
             if (method == "") method = "-"
             if (status == "") status = "-"

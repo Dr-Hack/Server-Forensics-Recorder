@@ -228,6 +228,17 @@ microseconds), and otherwise prints a one-line hint on enabling it. To enable
 timing, add `%D` to the end of the cPanel Apache `LogFormat` (a custom
 `Include`), e.g. `... \"%{User-Agent}i\" %D`.
 
+For `admin-ajax.php` / `admin-post.php` the report keeps the `action` parameter
+(e.g. `admin-ajax.php?action=edd_download`) so the responsible plugin/feature is
+named; ids and nonces are dropped to keep the table bounded. Only **GET** actions
+reach the log — a POST action (WordPress `heartbeat`, most plugin AJAX) is in the
+request body, which Apache does not record.
+
+The `--io` capture also records the kernel ring buffer (`dmesg`, last
+`PANIC_DMESG_LINES` lines, default 200) — OOM-killer kills, ext4/jbd2 journal
+errors, and block/virtio timeouts during a stall — alongside `/proc/diskstats`,
+`/proc/mounts`, `mount`, and `findmnt`.
+
 The client-IP table labels the **server's own addresses** — discovered at
 runtime from `hostname -I` / `ip addr`, never hardcoded — as loopback /
 self-requests (`wp-cron`, cPanel health pings), so a self-request row is not read

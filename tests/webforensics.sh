@@ -86,11 +86,25 @@ row1="$(printf '%s\n' "$FILTERED" | head -n 1)"
 assert_eq "$(printf '%s' "$row1" | cut -f2)" "162.158.158.118" "client IP is extracted"
 assert_eq "$(printf '%s' "$row1" | cut -f3)" "200" "status is extracted from the right field"
 assert_eq "$(printf '%s' "$row1" | cut -f4)" "POST" "method is extracted"
-assert_eq "$(printf '%s' "$row1" | cut -f5)" "/wp-admin/admin-ajax.php" "query string is stripped from the path"
+assert_eq "$(printf '%s' "$row1" | cut -f5)" "/wp-admin/admin-ajax.php?action=heartbeat" "the AJAX action is preserved on the path"
 assert_eq "$(printf '%s' "$row1" | cut -f6)" "Mozilla/5.0 flood" "user agent is extracted by quote-splitting"
 
 realip_row="$(printf '%s\n' "$FILTERED" | awk -F'\t' '$2=="203.0.113.9"')"
 assert_eq "$(printf '%s' "$realip_row" | cut -f5)" "/wp-login.php" "path is lifted correctly even for a restored real IP line"
+
+# --- AJAX action preservation -------------------------------------------------
+# The action names the plugin/feature; keep it for admin-ajax/admin-post, drop
+# ids/nonces to bound cardinality, and strip the query for everything else.
+printf 'AJAX action preservation\n'
+cat >"${WORK}/action.log" <<'LOG'
+203.0.113.9 - - [25/Jul/2026:00:15:00 +0500] "GET /wp-admin/admin-ajax.php?action=edd_download&id=5&_wpnonce=abc HTTP/1.1" 200 900 "-" "bot"
+203.0.113.9 - - [25/Jul/2026:00:15:01 +0500] "GET /wp-admin/admin-ajax.php HTTP/1.1" 200 900 "-" "bot"
+203.0.113.9 - - [25/Jul/2026:00:15:02 +0500] "GET /shop/?s=widget&paged=3 HTTP/1.1" 200 900 "-" "bot"
+LOG
+ACT="$(web_filter_window 20260725001400 20260725002000 <"${WORK}/action.log")"
+assert_eq "$(printf '%s\n' "$ACT" | awk -F'\t' 'NR==1{print $5}')" "/wp-admin/admin-ajax.php?action=edd_download" "action is kept while ids/nonces are dropped"
+assert_eq "$(printf '%s\n' "$ACT" | awk -F'\t' 'NR==2{print $5}')" "/wp-admin/admin-ajax.php" "admin-ajax without an action stays clean"
+assert_eq "$(printf '%s\n' "$ACT" | awk -F'\t' 'NR==3{print $5}')" "/shop/" "a non-AJAX path still has its query stripped"
 
 # --- reporting ----------------------------------------------------------------
 
