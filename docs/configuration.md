@@ -14,12 +14,15 @@ spaces.
 ```bash
 INTERVAL=60
 LOG_DIR=/var/log/server-forensics
-KEEP_INCIDENTS=100
+KEEP_INCIDENTS=50
 ```
 
 - `INTERVAL`: Expected timer cadence in seconds. Must be at least `10`.
 - `LOG_DIR`: Absolute path for logs, incidents, archives, and state.
 - `KEEP_INCIDENTS`: Number of uncompressed incidents to keep before rotation.
+  This is the *shipped default for a fresh install only* — `install.sh` never
+  overwrites an existing `/etc/server-forensics/config.conf`, so changing it here
+  does not alter an already-installed host; edit that host's config directly.
 
 ## Thresholds
 
