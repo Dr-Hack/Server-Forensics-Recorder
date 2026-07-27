@@ -132,7 +132,9 @@ capture_dstate_kernel_stacks() {
                 order+=("$p")
             fi
         done < <(ps -eo pid,user,state,wchan:40,comm,args 2>/dev/null | awk 'NR==1 || $3 ~ /^D/')
-        [[ "$k" -lt "$samples" ]] && sleep "$interval" 2>/dev/null || true
+        if [[ "$k" -lt "$samples" ]]; then
+            sleep "$interval" 2>/dev/null || true
+        fi
     done
 
     if ! sf_bool "${PANIC_CAPTURE_KERNEL_STACK:-1}"; then
