@@ -95,36 +95,70 @@ run_diag_shell() {
     fi
 }
 
-# Reads kernel stacks and wchan for the D-state processes that are the whole
-# point of this investigation. Runs entirely from /proc — no disk I/O to the
-# (possibly stalled) filesystem — and is bounded by PANIC_DSTATE_MAX_PIDS so a
-# storm of blocked tasks can never make the recorder fan out. Skips gracefully
-# when the kernel or permissions withhold the stack (needs root; some hardened
-# kernels restrict /proc/<pid>/stack entirely).
+# Rapid D-state capture — the answer to "WHAT were the blocked tasks waiting on".
+#
+# Blocked tasks are transient: during a stall they block and unblock every few
+# milliseconds, so a single instantaneous `ps` usually catches none, which is why
+# earlier reports read "Wait channels: unavailable" even mid-stall. This samples
+# the D-state set PANIC_DSTATE_SAMPLES times at PANIC_DSTATE_INTERVAL, writing
+# each pass under a "D-state only" header so the analysis wait-channel histogram
+# tallies wchan across all of them, and unions the PIDs seen. For each unique PID
+# it then reads wchan, the current syscall (arg0 is usually the fd), and the
+# kernel stack — the call path that names the wait (jbd2 journal commit vs page
+# writeback vs read).
+#
+# Runs entirely from /proc — no disk I/O to the (possibly stalled) filesystem —
+# capped by PANIC_DSTATE_MAX_PIDS so a storm of blocked tasks cannot make the
+# recorder fan out, and every deep read is timeout-bounded. Skips gracefully when
+# the kernel or permissions withhold the stack (needs root; some hardened kernels
+# restrict /proc/<pid>/stack entirely).
 capture_dstate_kernel_stacks() {
     local file="$1"
     local max="${PANIC_DSTATE_MAX_PIDS:-25}"
-    local -a pids=()
-    local pid comm
+    local samples="${PANIC_DSTATE_SAMPLES:-6}"
+    local interval="${PANIC_DSTATE_INTERVAL:-0.5}"
+    local tmo="${PANIC_DSTATE_READ_TIMEOUT:-2}"
+    local -A seen=()
+    local -a order=()
+    local k line p pid comm
 
-    append_header "$file" "kernel stacks (D-state, capped ${max})"
+    for ((k = 1; k <= samples; k++)); do
+        append_header "$file" "ps wchan (D-state only) sample ${k}/${samples}"
+        while IFS= read -r line; do
+            printf '%s\n' "$line" >>"$file"
+            read -r p _ <<<"$line"
+            if [[ "$p" =~ ^[0-9]+$ && -z "${seen[$p]:-}" ]]; then
+                seen[$p]=1
+                order+=("$p")
+            fi
+        done < <(ps -eo pid,user,state,wchan:40,comm,args 2>/dev/null | awk 'NR==1 || $3 ~ /^D/')
+        [[ "$k" -lt "$samples" ]] && sleep "$interval" 2>/dev/null || true
+    done
 
-    mapfile -t pids < <(ps -eo pid=,stat= 2>/dev/null | awk '$2 ~ /^D/ { print $1 }' | head -n "$max")
-
-    if [[ "${#pids[@]}" -eq 0 ]]; then
-        printf 'no D-state processes present at capture time\n' >>"$file"
+    if ! sf_bool "${PANIC_CAPTURE_KERNEL_STACK:-1}"; then
         return 0
     fi
 
-    for pid in "${pids[@]}"; do
+    append_header "$file" "kernel stacks + syscall (D-state union, capped ${max})"
+    if [[ "${#order[@]}" -eq 0 ]]; then
+        printf 'no D-state processes caught across %s samples\n' "$samples" >>"$file"
+        return 0
+    fi
+
+    local n=0
+    for pid in "${order[@]}"; do
+        ((n++))
+        ((n > max)) && break
         comm="$(cat "/proc/${pid}/comm" 2>/dev/null || printf '?')"
         {
             printf '\n--- pid %s (%s) ---\n' "$pid" "$comm"
-            printf 'wchan: '
+            printf 'wchan:   '
             cat "/proc/${pid}/wchan" 2>/dev/null || printf '[unavailable]'
-            printf '\nstack:\n'
+            printf '\nsyscall: '
+            run_with_timeout "$tmo" cat "/proc/${pid}/syscall" 2>/dev/null || printf '[unavailable]'
+            printf 'stack:\n'
             if [[ -r "/proc/${pid}/stack" ]]; then
-                cat "/proc/${pid}/stack" 2>/dev/null || printf '[stack unreadable]\n'
+                run_with_timeout "$tmo" cat "/proc/${pid}/stack" 2>/dev/null || printf '[stack unreadable]\n'
             else
                 printf '[stack unavailable — needs root / permitted kernel]\n'
             fi
@@ -182,15 +216,12 @@ capture_forensics() {
         printf 'created_at=%s\n' "$(now_iso)"
     } >"$file"
 
-    # Full process table with wait channels, then the D-state processes alone —
-    # the single most valuable signal for "high load, low CPU".
+    # Full process table with wait channels, then rapid D-state sampling — the
+    # single most valuable signal for "high load, low CPU". The rapid sampler
+    # emits the repeated "D-state only" blocks (and, gated by
+    # PANIC_CAPTURE_KERNEL_STACK, the per-PID stacks + syscall).
     run_diag "$file" "ps wchan (all)" ps -eo pid,user,state,wchan:40,comm,args
-    run_diag_shell "$file" "ps wchan (D-state only)" \
-        "ps -eo pid,user,state,wchan:40,comm,args | awk 'NR==1 || \$3 ~ /^D/'"
-
-    if sf_bool "${PANIC_CAPTURE_KERNEL_STACK:-1}"; then
-        capture_dstate_kernel_stacks "$file"
-    fi
+    capture_dstate_kernel_stacks "$file"
 
     # PSI: how long tasks were actually stalled on I/O, CPU, and memory — the
     # measurement that distinguishes a storage stall from CPU or memory pressure.

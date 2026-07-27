@@ -138,6 +138,16 @@ assert_contains "$A" "Timeline:" "timeline section present"
 assert_contains "$A" "Recurring patterns" "correlation section present"
 assert_contains "$A" "Filesystem wait" "filesystem hypothesis listed"
 assert_contains "$A" "ext4_writepages" "wchan surfaced as evidence"
+
+# Kernel wait-channel histogram: counts the D-state rows and maps the channel to
+# a subsystem, so "what were they blocked on" is answerable.
+assert_contains "$A" "Kernel wait channels" "wait-channel histogram section present"
+if grep -qE '2 +ext4_writepages +-> Filesystem' "$A"; then
+    pass "histogram counts the channel and maps it to a subsystem"
+else
+    fail "histogram should show '2 ext4_writepages -> Filesystem'"
+fi
+
 assert_contains "$A" "PSI io full avg10 78.4" "PSI evidence surfaced"
 assert_contains "$A" "Stall class was I/O" "PSI proves the I/O stall class"
 assert_contains "$A" "load=41.2" "timeline reflects the peak-load sample"

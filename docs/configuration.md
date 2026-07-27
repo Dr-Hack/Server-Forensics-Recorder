@@ -53,23 +53,40 @@ PANIC_OUTPUT_LINES=5000
 ENABLE_DSTATE_FORENSICS=1
 PANIC_CAPTURE_KERNEL_STACK=1
 PANIC_DSTATE_MAX_PIDS=25
+PANIC_DSTATE_SAMPLES=6
+PANIC_DSTATE_INTERVAL=0.5
+PANIC_DSTATE_READ_TIMEOUT=2
 PANIC_CAPTURE_PSI=1
 ```
 
 Most incidents on the target server were driven by uninterruptible (D-state)
 processes producing very high load with low CPU. During each panic snapshot the
 recorder writes a `dstate-N.log` with the full `ps` wait-channel table, the
-D-state processes alone, per-PID kernel stacks, the process tree, scheduled
-jobs, and any detected maintenance/package/backup activity. All of it is cheap
-`/proc` reads; package managers are detected from the process table, never run.
+D-state processes alone, per-PID kernel stacks + current syscall, the process
+tree, scheduled jobs, and any detected maintenance/package/backup activity. All
+of it is cheap `/proc` reads; package managers are detected from the process
+table, never run.
+
+Blocked tasks are **transient** — they block and unblock every few milliseconds
+during a stall, so a single `ps` usually catches none, which is why reports could
+read *"Wait channels: unavailable"* even mid-stall. The capture therefore samples
+the D-state set repeatedly and unions the PIDs, and the analysis renders a
+**kernel wait-channel histogram** (what the tasks were blocked in, mapped to a
+subsystem). On a uniformly slow disk there is no single stuck file; the wait
+*path* is the actionable answer — `jbd2_log_wait_commit` → journal/fsync stall,
+`wait_on_page_writeback` → dirty-page flushing, read/folio paths → reads.
 
 - `ENABLE_DSTATE_FORENSICS`: Master switch for the D-state capture and the
   `analysis.txt` investigation engine.
-- `PANIC_CAPTURE_KERNEL_STACK`: Read `/proc/<pid>/stack` and `wchan` for blocked
-  processes. Needs root; some hardened kernels restrict it, in which case the
-  capture notes the value as unavailable and continues.
+- `PANIC_CAPTURE_KERNEL_STACK`: Read `/proc/<pid>/stack`, `wchan`, and `syscall`
+  for blocked processes. Needs root; some hardened kernels restrict it, in which
+  case the capture notes the value as unavailable and continues.
 - `PANIC_DSTATE_MAX_PIDS`: Cap on how many D-state PIDs get a kernel-stack read
   per snapshot, so a storm of blocked tasks cannot make the recorder fan out.
+- `PANIC_DSTATE_SAMPLES`, `PANIC_DSTATE_INTERVAL`: How many times, and how far
+  apart, the D-state set is sampled to catch the transient blockers.
+- `PANIC_DSTATE_READ_TIMEOUT`: Per-PID timeout for each `/proc/<pid>/{syscall,stack}`
+  read, so a deeply-blocked task can never stall the recorder.
 - `PANIC_CAPTURE_PSI`: Capture PSI (Pressure Stall Information) from
   `/proc/pressure/{io,cpu,memory}` during each panic snapshot, and track the peak
   io/cpu/memory pressure for the incident. On a PSI-capable kernel this is the

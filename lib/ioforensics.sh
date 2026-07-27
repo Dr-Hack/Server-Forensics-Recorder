@@ -560,6 +560,21 @@ capture_io_forensics() {
     io_header "$file" "/proc/mounts"
     cat /proc/mounts 2>/dev/null >>"$file" || printf '[unreadable]\n' >>"$file"
 
+    # Per-device queue depth and in-flight I/O — names how deep the block layer is
+    # backed up on the slow device, which diskstats' cumulative counters do not
+    # show. All instantaneous, non-blocking sysfs reads.
+    io_header "$file" "/sys/block device stats (stat + inflight)"
+    {
+        local dev d
+        for dev in /sys/block/*; do
+            [[ -d "$dev" ]] || continue
+            d="$(basename "$dev")"
+            case "$d" in ram* | dm-*) continue ;; esac
+            printf '%-8s stat:     %s\n' "$d" "$(cat "${dev}/stat" 2>/dev/null || printf '[unreadable]')"
+            printf '%-8s inflight: %s\n' "$d" "$(cat "${dev}/inflight" 2>/dev/null || printf '[unreadable]')"
+        done
+    } >>"$file" 2>/dev/null
+
     io_run_now "$file" "mount" mount
     # --real is unsupported on some el8 findmnt builds; without it we get all
     # mounts (matching `mount`/`/proc/mounts` above), which is fine.

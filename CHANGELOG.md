@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.5.2 — 2026-07-28
+
+Answering "**what** were the blocked tasks waiting on", not just "that they were
+blocked". Reports kept reading *Wait channels: unavailable* even mid-stall
+because blocked tasks are transient — they block and unblock every few
+milliseconds, so a single `ps` catches none.
+
+### Added
+
+- **Rapid D-state sampling.** Panic mode now samples the D-state set
+  `PANIC_DSTATE_SAMPLES` times (default 6) at `PANIC_DSTATE_INTERVAL` (default
+  0.5s), writing each pass under a "D-state only" header and unioning the PIDs —
+  which is what actually catches the transient blockers. Everything is `/proc`
+  reads (no I/O to the possibly-stalled filesystem), capped by
+  `PANIC_DSTATE_MAX_PIDS`, and every deep read is `PANIC_DSTATE_READ_TIMEOUT`-bounded.
+- **`/proc/<pid>/syscall` per blocked task** — the current syscall and its args
+  (arg0 is usually the fd), alongside the existing wchan and kernel stack.
+- **Kernel wait-channel histogram in the analysis.** The report now lists what
+  the D-state tasks were blocked in, counted across samples, each mapped to a
+  subsystem — so `jbd2_log_wait_commit` reads as a journal/fsync stall,
+  `wait_on_page_writeback` as dirty-page flushing, and read/folio paths as reads.
+  On a uniformly slow disk there is no single stuck file; the wait *path* is the
+  actionable answer, and it points at the fix.
+- **`/sys/block/*/stat` + `inflight`** in the `--io` capture — per-device queue
+  depth and in-flight I/O, which the cumulative diskstats counters do not show.
+
 ## 0.5.1 — 2026-07-27
 
 ### Added

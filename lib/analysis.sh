@@ -992,6 +992,30 @@ analysis_aggregate_section() {
     printf '%s\n' "$combined" | agg_rollup | agg_render_rollup | sed 's/^/  /'
 }
 
+# The kernel wait-channel histogram: WHAT the blocked tasks were waiting on,
+# counted across the rapid D-state samples (field 4 of the "D-state only" ps
+# blocks). On a uniformly slow disk there is no single stuck file — the payoff is
+# the wait PATH, which points at the fix: jbd2_log_wait_commit -> journal/fsync
+# storm; wait_on_page_writeback -> dirty-page flushing; read/folio paths -> reads.
+analysis_wchan_section() {
+    local dir="$1"
+    local hist
+    hist="$(analysis_field_counts "$dir" 4 2>/dev/null | head -n 10)"
+    [[ -n "$hist" ]] || return 0
+
+    printf 'Kernel wait channels (D-state tasks, counted across samples):\n'
+    printf '%s\n' "$hist" | while IFS=$'\t' read -r cnt wch; do
+        [[ -n "$wch" ]] || continue
+        local sub
+        sub="$(analysis_wchan_subsystem "$wch")"
+        if [[ -n "$sub" ]]; then
+            printf '  %5d  %-34s -> %s\n' "$cnt" "$wch" "$sub"
+        else
+            printf '  %5d  %s\n' "$cnt" "$wch"
+        fi
+    done
+}
+
 # The pre-incident run-up, reconstructed from the process ring buffer. This is
 # the window the panic samplers structurally cannot reach: load1 lags, so by the
 # time panic mode starts sampling, a sub-minute burst is already collapsing.
@@ -1356,6 +1380,12 @@ analysis_generate() {
 
         analysis_runup_section "$dir"
         printf '\n'
+
+        local wchan_out
+        wchan_out="$(analysis_wchan_section "$dir")"
+        if [[ -n "$wchan_out" ]]; then
+            printf '%s\n\n' "$wchan_out"
+        fi
 
         analysis_ledger "$dir"
         printf '\n'
