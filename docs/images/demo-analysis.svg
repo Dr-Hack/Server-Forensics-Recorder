@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="694" viewBox="0 0 660 694" font-family="ui-monospace, 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace" font-size="14">
+  <defs>
+    <style>
+      .t { fill:#abb2bf; white-space:pre; }
+      .dim { fill:#5c6370; }
+      .grn { fill:#98c379; }
+      .cyn { fill:#56b6c2; }
+      .amb { fill:#d19a66; }
+      .blu { fill:#61afef; }
+      .wht { fill:#dfe3ea; }
+      .b { font-weight:700; }
+      .i { font-style:italic; }
+    </style>
+  </defs>
+  <rect x="1" y="1" width="658" height="692" rx="11" fill="#1c1e26" stroke="#3a3e4d" stroke-width="1"/>
+  <path d="M1,40 L1,12 Q1,1 12,1 L648,1 Q659,1 659,12 L659,40 Z" fill="#2b2e39"/>
+  <line x1="1" y1="40" x2="659" y2="40" stroke="#3a3e4d" stroke-width="1"/>
+  <circle cx="22" cy="20.5" r="6.5" fill="#ff5f56"/>
+  <circle cx="44" cy="20.5" r="6.5" fill="#ffbd2e"/>
+  <circle cx="66" cy="20.5" r="6.5" fill="#27c93f"/>
+  <text x="330" y="25" text-anchor="middle" font-size="12.5" fill="#8b91a0">prod.server — server-forensics — 84×26</text>
+
+  <text class="t" x="22" y="66"><tspan class="dim">$ </tspan><tspan class="grn b">server-forensics</tspan><tspan class="blu"> --last-analysis</tspan></text>
+  <text class="t wht" x="22" y="110">Server Forensics Incident Analysis</text>
+  <text class="t" x="22" y="132"><tspan class="dim">Incident: </tspan><tspan class="wht">incident-20260728-003904</tspan></text>
+  <text class="t dim" x="22" y="176">========================================</text>
+  <text class="t" x="22" y="198"><tspan class="amb b">LIKELY CAUSE: </tspan><tspan class="amb">Filesystem wait (51%)</tspan></text>
+  <text class="t" x="22" y="220"><tspan class="dim">Mechanism:    </tspan><tspan class="t">blocked (uninterruptible) tasks (77%)</tspan></text>
+  <text class="t dim" x="22" y="242">========================================</text>
+  <text class="t cyn" x="22" y="286">-- Observed facts (measured, no interpretation) --</text>
+  <text class="t" x="22" y="308"><tspan class="t">  - Peak load: </tspan><tspan class="amb">8.73</tspan></text>
+  <text class="t" x="22" y="330"><tspan class="t">  - CPU at peak load: </tspan><tspan class="amb">5.0%</tspan></text>
+  <text class="t" x="22" y="352"><tspan class="t">  - Peak IO wait: </tspan><tspan class="amb">66.7%</tspan></text>
+  <text class="t" x="22" y="374"><tspan class="t">  - Peak D-state processes: </tspan><tspan class="amb">6</tspan></text>
+  <text class="t" x="22" y="396"><tspan class="t">  - PSI io full avg10 (peak): </tspan><tspan class="amb">46.39</tspan></text>
+  <text class="t" x="22" y="418"><tspan class="t">  - PSI memory full avg10 (peak): </tspan><tspan class="amb">25.97</tspan></text>
+  <text class="t cyn" x="22" y="462">Kernel wait channels (D-state, counted across samples):</text>
+  <text class="t" x="22" y="484"><tspan class="amb">    14  </tspan><tspan class="wht">jbd2_log_wait_commit      </tspan><tspan class="grn">-&gt; Filesystem</tspan></text>
+  <text class="t" x="22" y="506"><tspan class="amb">     5  </tspan><tspan class="wht">wait_on_page_bit          </tspan><tspan class="grn">-&gt; Filesystem</tspan></text>
+  <text class="t grn b" x="22" y="550">Proven:</text>
+  <text class="t grn" x="22" y="572">  - Not CPU-bound: 5.0% CPU at load 8.73 (measured)</text>
+  <text class="t grn" x="22" y="594">  - Busiest endpoint: example.com/index.php (97% CPU)</text>
+  <text class="t grn" x="22" y="616">  - Stall class was I/O: PSI io full avg10 46.39</text>
+
+  <text class="t dim i" x="22" y="654">… output trimmed for display. The full report also carries the</text>
+  <text class="t dim i" x="22" y="676">  timeline, confidence distribution, evidence ledger, and next steps.</text>
+</svg>

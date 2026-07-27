@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="684" viewBox="0 0 660 684" font-family="ui-monospace, 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace" font-size="14">
+  <defs>
+    <style>
+      .t { fill:#abb2bf; } .dim { fill:#5c6370; } .grn { fill:#98c379; }
+      .cyn { fill:#56b6c2; } .amb { fill:#d19a66; } .blu { fill:#61afef; }
+      .wht { fill:#dfe3ea; } .b { font-weight:700; } .i { font-style:italic; }
+      .r { text-anchor:end; }
+    </style>
+  </defs>
+  <rect x="1" y="1" width="658" height="682" rx="11" fill="#1c1e26" stroke="#3a3e4d" stroke-width="1"/>
+  <path d="M1,40 L1,12 Q1,1 12,1 L648,1 Q659,1 659,12 L659,40 Z" fill="#2b2e39"/>
+  <line x1="1" y1="40" x2="659" y2="40" stroke="#3a3e4d" stroke-width="1"/>
+  <circle cx="22" cy="20.5" r="6.5" fill="#ff5f56"/>
+  <circle cx="44" cy="20.5" r="6.5" fill="#ffbd2e"/>
+  <circle cx="66" cy="20.5" r="6.5" fill="#27c93f"/>
+  <text x="330" y="25" text-anchor="middle" font-size="12.5" fill="#8b91a0">prod.server — server-forensics — 84×26</text>
+
+  <text x="22" y="66"><tspan class="dim">$ </tspan><tspan class="grn b">server-forensics</tspan><tspan class="blu"> --requests</tspan></text>
+  <text class="cyn" x="22" y="110">===== Web request attribution =====</text>
+  <text class="dim" x="22" y="132">window = incident 00:15:38 .. 02:14:10</text>
+
+  <text class="cyn" x="22" y="176">Requests per domain (vhost):</text>
+  <text class="amb r" x="98" y="198">24891</text><text class="wht" x="112" y="198">example.com</text>
+  <text class="amb r" x="98" y="220">798</text><text class="wht" x="112" y="220">blog.example.com</text>
+
+  <text class="cyn" x="22" y="264">Top requests (host + URI, by hits):</text>
+  <text class="dim" x="22" y="286">HOST</text><text class="dim" x="150" y="286">URI</text><text class="dim r" x="636" y="286">REQUESTS</text>
+  <text class="blu" x="22" y="308">example.com</text><text class="wht" x="150" y="308">/wp-admin/admin-post.php</text><text class="amb r" x="636" y="308">6707</text>
+  <text class="blu" x="22" y="330">example.com</text><text class="wht" x="150" y="330">/</text><text class="amb r" x="636" y="330">4791</text>
+  <text class="blu" x="22" y="352">example.com</text><text class="wht" x="150" y="352">/wp-admin/admin-ajax.php?action=edd_download</text><text class="amb r" x="636" y="352">2132</text>
+  <text class="blu" x="22" y="374">example.com</text><text class="wht" x="150" y="374">/wp-cron.php</text><text class="amb r" x="636" y="374">901</text>
+
+  <text class="cyn" x="22" y="418">Top client IPs (by hits):</text>
+  <text class="amb r" x="98" y="440">22542</text><text class="wht" x="112" y="440">198.51.100.23</text>
+  <text class="amb r" x="98" y="462">977</text><text class="wht" x="112" y="462">203.0.113.10</text><text class="dim" x="250" y="462">&lt;- this server (loopback, benign)</text>
+  <text class="amb r" x="98" y="484">193</text><text class="wht" x="112" y="484">203.0.113.44</text>
+
+  <text class="cyn" x="22" y="528">Known-abuse endpoints hit in window:</text>
+  <text class="amb r" x="98" y="550">6789</text><text class="wht" x="112" y="550">admin-post.php</text>
+  <text class="amb r" x="98" y="572">2144</text><text class="wht" x="112" y="572">admin-ajax.php</text>
+  <text class="amb r" x="98" y="594">901</text><text class="wht" x="112" y="594">wp-cron.php</text>
+
+  <text class="dim i" x="22" y="638">… output trimmed for display. The full report also lists the top</text>
+  <text class="dim i" x="22" y="660">  user agents and a Cloudflare-edge caveat when the IPs are the CDN.</text>
+</svg>

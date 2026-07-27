@@ -69,6 +69,34 @@ captures deeper diagnostics only when the server crosses a configured threshold.
 It is intentionally not a monitoring dashboard. Netdata, Prometheus, Grafana,
 and similar tools are still the right place for live monitoring.
 
+## Example Output
+
+Every report is plain text you can read over SSH or pipe anywhere — no daemon, no
+web UI. The excerpts below are from a real incident (sanitized); each full report
+carries more.
+
+**`server-forensics --last-analysis`** — the evidence-based verdict: observed
+facts, a kernel wait-channel histogram naming *what* the blocked tasks waited on,
+and a Proven tier gated by missing evidence so it never overstates.
+
+![server-forensics --last-analysis](docs/images/demo-analysis.svg)
+
+**`server-forensics --requests`** — which URL and client IP drove the load: a
+per-vhost tally, the real pages behind `index.php` (with the AJAX `action=`), and
+top client IPs with the server's own loopback labelled.
+
+![server-forensics --requests](docs/images/demo-requests.svg)
+
+**`server-forensics --offenders`** — which process, aggregated so a worker pool
+of short-lived `lsphp` reads as one row instead of vanishing per-PID.
+
+![server-forensics --offenders](docs/images/demo-offenders.svg)
+
+**`server-forensics --last-incident`** — the at-a-glance summary of the most
+recent incident.
+
+![server-forensics --last-incident](docs/images/demo-last-incident.svg)
+
 ## Target Stack
 
 Built for real-world shared hosting and WordPress infrastructure:

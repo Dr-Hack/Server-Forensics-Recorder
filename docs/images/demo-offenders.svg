@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="620" height="552" viewBox="0 0 620 552" font-family="ui-monospace, 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace" font-size="14">
+  <defs>
+    <style>
+      .t { fill:#abb2bf; } .dim { fill:#5c6370; } .grn { fill:#98c379; }
+      .cyn { fill:#56b6c2; } .amb { fill:#d19a66; } .blu { fill:#61afef; }
+      .wht { fill:#dfe3ea; } .b { font-weight:700; } .i { font-style:italic; }
+      .r { text-anchor:end; }
+    </style>
+  </defs>
+  <rect x="1" y="1" width="618" height="550" rx="11" fill="#1c1e26" stroke="#3a3e4d" stroke-width="1"/>
+  <path d="M1,40 L1,12 Q1,1 12,1 L608,1 Q619,1 619,12 L619,40 Z" fill="#2b2e39"/>
+  <line x1="1" y1="40" x2="619" y2="40" stroke="#3a3e4d" stroke-width="1"/>
+  <circle cx="22" cy="20.5" r="6.5" fill="#ff5f56"/>
+  <circle cx="44" cy="20.5" r="6.5" fill="#ffbd2e"/>
+  <circle cx="66" cy="20.5" r="6.5" fill="#27c93f"/>
+  <text x="310" y="25" text-anchor="middle" font-size="12.5" fill="#8b91a0">prod.server — server-forensics — 84×26</text>
+
+  <text x="22" y="66"><tspan class="dim">$ </tspan><tspan class="grn b">server-forensics</tspan><tspan class="blu"> --offenders</tspan></text>
+
+  <text class="cyn" x="22" y="110">-- Combined by executable --</text>
+  <text class="dim" x="22" y="132">EXECUTABLE</text><text class="dim" x="140" y="132">SUBSYSTEM</text><text class="dim r" x="300" y="132">CPU%</text><text class="dim r" x="410" y="132">WRITE_KBs</text><text class="dim r" x="475" y="132">PROCS</text><text class="dim r" x="575" y="132">PEAK_CPU</text>
+  <text class="wht" x="22" y="154">lsphp</text><text class="cyn" x="140" y="154">PHP</text><text class="amb r" x="300" y="154">136.72</text><text class="t r" x="410" y="154">0.00</text><text class="t r" x="475" y="154">6</text><text class="t r" x="575" y="154">55.00</text>
+  <text class="wht" x="22" y="176">mariadbd</text><text class="cyn" x="140" y="176">MariaDB</text><text class="amb r" x="300" y="176">5.39</text><text class="t r" x="410" y="176">107.83</text><text class="t r" x="475" y="176">1</text><text class="t r" x="575" y="176">5.39</text>
+  <text class="wht" x="22" y="198">httpd</text><text class="cyn" x="140" y="198">Apache</text><text class="amb r" x="300" y="198">6.63</text><text class="t r" x="410" y="198">3.92</text><text class="t r" x="475" y="198">4</text><text class="t r" x="575" y="198">2.97</text>
+
+  <text class="cyn" x="22" y="242">-- Combined by subsystem --</text>
+  <text class="dim" x="22" y="264">SUBSYSTEM</text><text class="dim r" x="300" y="264">CPU%</text><text class="dim r" x="410" y="264">WRITE_KBs</text><text class="dim r" x="475" y="264">PROCS</text>
+  <text class="cyn" x="22" y="286">PHP</text><text class="amb r" x="300" y="286">136.72</text><text class="t r" x="410" y="286">0.00</text><text class="t r" x="475" y="286">6</text>
+  <text class="cyn" x="22" y="308">MariaDB</text><text class="amb r" x="300" y="308">5.39</text><text class="t r" x="410" y="308">107.83</text><text class="t r" x="475" y="308">1</text>
+  <text class="cyn" x="22" y="330">Filesystem</text><text class="amb r" x="300" y="330">4.99</text><text class="t r" x="410" y="330">64.42</text><text class="t r" x="475" y="330">7</text>
+
+  <text class="cyn" x="22" y="374">-- Ranked by CPU --</text>
+  <text class="dim" x="22" y="396">PID</text><text class="dim" x="160" y="396">COMMAND</text><text class="dim r" x="340" y="396">CPU_PCT</text><text class="dim r" x="445" y="396">SAMPLES</text><text class="dim r" x="560" y="396">PCT_CPU</text>
+  <text class="dim" x="22" y="418">2435845</text><text class="wht" x="160" y="418">lsphp</text><text class="amb r" x="340" y="418">55.00</text><text class="t r" x="445" y="418">1</text><text class="grn r" x="560" y="418">32.1%</text>
+  <text class="dim" x="22" y="440">2435846</text><text class="wht" x="160" y="440">lsphp</text><text class="amb r" x="340" y="440">50.00</text><text class="t r" x="445" y="440">1</text><text class="grn r" x="560" y="440">29.2%</text>
+  <text class="dim" x="22" y="462">39327</text><text class="wht" x="160" y="462">mariadbd</text><text class="amb r" x="340" y="462">5.39</text><text class="t r" x="445" y="462">5</text><text class="grn r" x="560" y="462">3.1%</text>
+
+  <text class="dim i" x="22" y="506">… output trimmed for display. The full report ranks every offender</text>
+  <text class="dim i" x="22" y="528">  by disk read+write too, with per-PID totals and IO-delay percent.</text>
+</svg>

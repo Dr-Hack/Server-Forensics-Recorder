@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="552" viewBox="0 0 600 552" font-family="ui-monospace, 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace" font-size="14">
+  <defs>
+    <style>
+      .t { fill:#abb2bf; } .dim { fill:#5c6370; } .grn { fill:#98c379; }
+      .cyn { fill:#56b6c2; } .amb { fill:#d19a66; } .blu { fill:#61afef; }
+      .wht { fill:#dfe3ea; } .b { font-weight:700; } .i { font-style:italic; }
+    </style>
+  </defs>
+  <rect x="1" y="1" width="598" height="550" rx="11" fill="#1c1e26" stroke="#3a3e4d" stroke-width="1"/>
+  <path d="M1,40 L1,12 Q1,1 12,1 L588,1 Q599,1 599,12 L599,40 Z" fill="#2b2e39"/>
+  <line x1="1" y1="40" x2="599" y2="40" stroke="#3a3e4d" stroke-width="1"/>
+  <circle cx="22" cy="20.5" r="6.5" fill="#ff5f56"/>
+  <circle cx="44" cy="20.5" r="6.5" fill="#ffbd2e"/>
+  <circle cx="66" cy="20.5" r="6.5" fill="#27c93f"/>
+  <text x="300" y="25" text-anchor="middle" font-size="12.5" fill="#8b91a0">prod.server — server-forensics — 84×26</text>
+
+  <text x="22" y="66"><tspan class="dim">$ </tspan><tspan class="grn b">server-forensics</tspan><tspan class="blu"> --last-incident</tspan></text>
+
+  <text class="dim" x="22" y="110">Incident ID:</text><text class="wht" x="200" y="110">incident-20260728-003904</text>
+  <text class="dim" x="22" y="132">Started:</text><text class="t" x="200" y="132">2026-07-28 00:39:04 +0500</text>
+  <text class="dim" x="22" y="154">Duration:</text><text class="t" x="200" y="154">46 seconds</text>
+  <text class="dim" x="22" y="176">Reason Triggered:</text><text class="amb" x="200" y="176">dstate=6&gt;5</text>
+
+  <text class="dim" x="22" y="220">Peak Load:</text><text class="amb" x="200" y="220">8.73</text>
+  <text class="dim" x="22" y="242">Peak D-state:</text><text class="amb" x="200" y="242">6</text>
+  <text class="dim" x="22" y="264">Peak IO Wait:</text><text class="amb" x="200" y="264">66.7%</text>
+  <text class="dim" x="22" y="286">PSI io (full avg10):</text><text class="amb" x="200" y="286">46.39</text>
+  <text class="dim" x="22" y="308">PSI memory (full):</text><text class="amb" x="200" y="308">25.97</text>
+  <text class="dim" x="22" y="330">Lowest Avail Mem:</text><text class="amb" x="200" y="330">2772 MB</text>
+
+  <text class="dim" x="22" y="374">Top CPU Process:</text><text x="200" y="374"><tspan class="wht">lsphp</tspan><tspan class="t"> (pid 2435845) at </tspan><tspan class="amb">55.00%</tspan></text>
+  <text class="dim" x="22" y="396">Top I/O Process:</text><text x="200" y="396"><tspan class="wht">mariadbd</tspan><tspan class="t"> (pid 39327) at </tspan><tspan class="amb">119.83 kB/s</tspan></text>
+
+  <text class="dim" x="22" y="440">Likely Cause:</text><text class="amb b" x="200" y="440">Filesystem wait (confidence 51%)</text>
+  <text class="dim" x="22" y="462">Mechanism:</text><text class="t" x="200" y="462">blocked tasks (77%)</text>
+
+  <text class="dim i" x="22" y="506">… output trimmed for display. See --last-analysis for the full</text>
+  <text class="dim i" x="22" y="528">  evidence ledger, timeline, and recommended next steps.</text>
+</svg>
