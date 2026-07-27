@@ -405,7 +405,7 @@ Default config file:
 /etc/server-forensics/config.conf
 ```
 
-Important defaults:
+Important Defaults:
 
 ```bash
 INTERVAL=60
