@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.6.1 — 2026-07-29
+
+### Added
+
+- **`steal_pct` in the lightweight sample.** CPU steal is time this vCPU was
+  *runnable* while the hypervisor scheduled another tenant onto the physical
+  core. It is produced by the provider's overcommit and **cannot be caused by
+  anything running in the guest**, which makes it the one metric in a hosting
+  dispute that cannot be attributed back to the customer. `/proc/stat` field 9
+  was already inside the line being summed for `total`, so capturing it costs
+  **nothing** — no extra process, no extra read.
+- **Steal surfaced everywhere it is actionable**: `Peak CPU Steal` in
+  `summary.txt`; an observed fact in the analysis; **per-row timeline
+  annotations** (`<- CPU steal 44.7% (host)`) so exact timestamps can be quoted;
+  a `CPU steal (host contention) n/N` line in the recurring-patterns block; and a
+  provider action item in the next steps. `STEAL_NOTABLE_PCT` (default 5).
+- **The `cpu_busy_pct` overlap is disclosed.** `cpu_busy_pct` is
+  `total - idle - iowait`, and `total` includes steal, so stolen time is counted
+  as busy — at 50% steal the box reads 50% busy having done no work. The
+  definition is deliberately **unchanged**, so new samples stay comparable with
+  every incident already recorded; instead the analysis states the overlap when
+  steal is high, and if the leading verdict is *CPU saturation* the ledger raises
+  stolen time as a competing explanation. Without this a host-contention event
+  would be scored as local CPU saturation and blamed on PHP.
+
+### Notes
+
+- Upgrading is seamless: the `.state/cpu_stat` baseline gains a fourth field, and
+  a pre-existing three-field file reports `steal_pct=NA` for exactly one cycle
+  while `cpu_busy_pct` and `iowait_pct` keep working. Kernels with no steal
+  column report `0` rather than reading past the end of the line.
+
 ## 0.6.0 — 2026-07-29
 
 0.5.2 added rapid D-state sampling to answer "what were the blocked tasks

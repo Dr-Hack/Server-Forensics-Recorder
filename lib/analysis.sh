@@ -274,6 +274,7 @@ analysis_pid1_leads_io() {
 #   W_CPU_AT_PEAK cpu_busy_pct on the peak-load sample (NA if that sample had none)
 #   W_MIN_CPU     lowest non-NA cpu_busy_pct
 #   W_MAX_IOWAIT  peak iowait_pct
+#   W_MAX_STEAL   peak steal_pct (hypervisor contention; NOT caused by our load)
 #   W_MAX_DSTATE  peak dstate_processes
 #   W_MIN_APACHE  lowest apache_workers seen
 #   W_MIN_DBTHR   lowest non-NA threads_running seen
@@ -289,6 +290,7 @@ analysis_window_stats() {
     W_CPU_AT_PEAK="NA"
     W_MIN_CPU="NA"
     W_MAX_IOWAIT="$(incident_meta_get "$dir" peak_iowait 0)"
+    W_MAX_STEAL="$(incident_meta_get "$dir" peak_steal 0)"
     W_MAX_DSTATE="$(incident_meta_get "$dir" peak_dstate 0)"
     W_MIN_APACHE="NA"
     W_MIN_DBTHR="NA"
@@ -312,31 +314,34 @@ analysis_window_stats() {
             load = field($0, "load1") + 0
             cpu = field($0, "cpu_busy_pct")
             iow = field($0, "iowait_pct")
+            stl = field($0, "steal_pct")
             ds  = field($0, "dstate_processes") + 0
             aw  = field($0, "apache_workers")
             db  = field($0, "threads_running")
             if (load > maxload) { maxload = load; cpuatpeak = cpu }
             if (cpu != "NA" && cpu != "") { c = cpu + 0; if (!seencpu || c < mincpu) { mincpu = c; seencpu = 1 } }
             if (iow != "NA" && iow != "") { w = iow + 0; if (w > maxiow) maxiow = w }
+            if (stl != "NA" && stl != "") { s = stl + 0; if (s > maxstl) maxstl = s }
             if (ds > maxds) maxds = ds
             if (aw != "NA" && aw != "") { a = aw + 0; if (!seenaw || a < minaw) { minaw = a; seenaw = 1 } }
             if (db != "NA" && db != "") { d = db + 0; if (!seendb || d < mindb) { mindb = d; seendb = 1 } }
         }
         END {
-            printf "%d|%s|%s|%s|%s|%s|%s|%s\n", n, maxload+0, \
+            printf "%d|%s|%s|%s|%s|%s|%s|%s|%s\n", n, maxload+0, \
                 (cpuatpeak == "" ? "NA" : cpuatpeak), \
                 (seencpu ? mincpu : "NA"), maxiow+0, maxds+0, \
-                (seenaw ? minaw : "NA"), (seendb ? mindb : "NA")
+                (seenaw ? minaw : "NA"), (seendb ? mindb : "NA"), maxstl+0
         }
     ' "$log" 2>/dev/null)"
 
     [[ -n "$stats" ]] || return 0
     IFS='|' read -r W_SAMPLES W_MAX_LOAD W_CPU_AT_PEAK W_MIN_CPU W_MAX_IOWAIT \
-        W_MAX_DSTATE W_MIN_APACHE W_MIN_DBTHR <<<"$stats"
+        W_MAX_DSTATE W_MIN_APACHE W_MIN_DBTHR W_MAX_STEAL <<<"$stats"
     # Prefer the retained meta peaks when the window scan found nothing bigger.
     W_MAX_LOAD="$(num_max "$W_MAX_LOAD" "$(incident_meta_get "$dir" peak_load 0)")"
     W_MAX_IOWAIT="$(num_max "$W_MAX_IOWAIT" "$(incident_meta_get "$dir" peak_iowait 0)")"
     W_MAX_DSTATE="$(num_max "$W_MAX_DSTATE" "$(incident_meta_get "$dir" peak_dstate 0)")"
+    W_MAX_STEAL="$(num_max "$W_MAX_STEAL" "$(incident_meta_get "$dir" peak_steal 0)")"
 }
 
 # --- confidence model --------------------------------------------------------
@@ -673,6 +678,21 @@ analysis_classify() {
         SF_EVIDENCE+=("MariaDB near-idle (${W_MIN_DBTHR} threads running) — not a DB bottleneck")
     fi
 
+    # Hypervisor contention. Steal is time this vCPU was runnable while the host
+    # scheduled another tenant onto the physical core: it is caused by the
+    # provider's overcommit, never by anything running here. Two consequences,
+    # both stated rather than folded silently into a verdict.
+    SF_STEAL_HIGH=0
+    if num_gt "${W_MAX_STEAL:-0}" "${STEAL_NOTABLE_PCT:-5}"; then
+        SF_STEAL_HIGH=1
+        SF_EVIDENCE+=("CPU steal peaked at ${W_MAX_STEAL}% — the hypervisor took the core; this is host contention, not our workload")
+        # cpu_busy_pct is (total - idle - iowait), and total includes steal, so
+        # stolen time is counted as busy. At 50% steal the box reads 50% busy
+        # having done no work at all. Without this note a steal event can be
+        # scored as CPU saturation and blamed on PHP.
+        SF_EVIDENCE+=("cpu_busy_pct includes stolen time, so the ${W_CPU_AT_PEAK}% at peak load overstates work actually done here by up to ${W_MAX_STEAL} points")
+    fi
+
     # --- caps and conversion to percentages -----------------------------------
     # Specific causes cannot be proven without pinning the layer. If the kernel
     # withheld both wchan and stack, cap them; PSI proves the *class* of stall so
@@ -882,6 +902,18 @@ analysis_ledger() {
         missing+=("PSI")
     }
     [[ "${#missing[@]}" -gt 0 ]] || printf '    (none — decisive evidence was captured)\n'
+
+    # A CPU-saturation verdict built on inflated numbers points the reader at
+    # their own processes for a problem they cannot fix. Say so where the verdict
+    # is justified, not only in the fact list.
+    if [[ "${SF_STEAL_HIGH:-0}" -eq 1 && "$leader" == "CPU saturation" ]]; then
+        printf '  Competing explanation:\n'
+        printf '    [!] %s%% of the measured CPU was STOLEN by the hypervisor, and\n' "${W_MAX_STEAL:-0}"
+        printf '    cpu_busy_pct counts stolen time as busy. Work actually done on this\n'
+        printf '    server was correspondingly lower, so "CPU saturation" here may be host\n'
+        printf '    contention rather than local load. Confirm against the per-process CPU\n'
+        printf '    table: if no local process accounts for the usage, it was not ours.\n'
+    fi
 
     if [[ "${SF_CAPTURE_STALE:-0}" -eq 1 ]]; then
         printf '  Capture staleness:\n'
@@ -1256,7 +1288,8 @@ analysis_timeline() {
     [[ "$end" -gt 0 ]] || end=9999999999
 
     awk -v start="$start" -v end="$end" \
-        -v loadt="${LOAD_THRESHOLD:-10}" -v dstatet="${DSTATE_THRESHOLD:-5}" '
+        -v loadt="${LOAD_THRESHOLD:-10}" -v dstatet="${DSTATE_THRESHOLD:-5}" \
+        -v stealt="${STEAL_NOTABLE_PCT:-5}" '
         function field(line, key,   nf, i, a, kv) {
             nf = split(line, a, " ")
             for (i = 1; i <= nf; i++) {
@@ -1272,6 +1305,7 @@ analysis_timeline() {
             ld[n] = field($0, "load1")
             cp[n] = field($0, "cpu_busy_pct")
             iw[n] = field($0, "iowait_pct")
+            st[n] = field($0, "steal_pct")
             ds[n] = field($0, "dstate_processes")
             aw[n] = field($0, "apache_workers")
             db[n] = field($0, "threads_running")
@@ -1289,6 +1323,8 @@ analysis_timeline() {
                     if ((ld[i-step]+0) <= loadt && (ld[i]+0) > loadt) note = note "  <- load crosses threshold"
                     if ((ds[i]+0) > (ds[i-step]+0) && (ds[i]+0) >= dstatet) note = note "  <- D-state climbing"
                     if (iw[i] != "NA" && iw[i-step] != "NA" && (iw[i]+0) - (iw[i-step]+0) >= 15) note = note "  <- IO wait spike"
+                    # Timestamped host contention: the row a provider has to answer for.
+                    if (st[i] != "NA" && st[i] != "" && (st[i]+0) > stealt) note = note sprintf("  <- CPU steal %s%% (host)", st[i])
                 } else {
                     note = "  <- incident window begins"
                 }
@@ -1313,13 +1349,14 @@ analysis_timeline() {
 # against this one even after the verbose dstate-*.log files are rotated away.
 analysis_write_facts() {
     local dir="$1"
-    local apache_idle=0 mariadb_idle=0 high_dstate=0 iowait_gt20=0
+    local apache_idle=0 mariadb_idle=0 high_dstate=0 iowait_gt20=0 steal_high=0
     local psi_io_high=0 psi_mem_high=0
 
     [[ "$W_MIN_APACHE" != "NA" && -n "$W_MIN_APACHE" ]] && num_lt "$W_MIN_APACHE" 50 && apache_idle=1
     [[ "$W_MIN_DBTHR" != "NA" && -n "$W_MIN_DBTHR" ]] && num_lt "$W_MIN_DBTHR" 4 && mariadb_idle=1
     num_gt "${W_MAX_DSTATE:-0}" "${DSTATE_THRESHOLD:-5}" && high_dstate=1
     num_gt "$(incident_meta_get "$dir" peak_iowait 0)" 20 && iowait_gt20=1
+    num_gt "$(incident_meta_get "$dir" peak_steal 0)" "${STEAL_NOTABLE_PCT:-5}" && steal_high=1
     num_gt "$(incident_meta_get "$dir" peak_psi_io_full 0)" 20 && psi_io_high=1
     num_gt "$(incident_meta_get "$dir" peak_psi_mem_full 0)" 10 && psi_mem_high=1
 
@@ -1328,6 +1365,7 @@ analysis_write_facts() {
         printf 'mariadb_idle=%s\n' "$mariadb_idle"
         printf 'high_dstate=%s\n' "$high_dstate"
         printf 'iowait_gt20=%s\n' "$iowait_gt20"
+        printf 'steal_high=%s\n' "$steal_high"
         printf 'psi_io_high=%s\n' "$psi_io_high"
         printf 'psi_mem_high=%s\n' "$psi_mem_high"
         printf 'imunify_active=%s\n' "${SF_IMUNIFY:-0}"
@@ -1368,6 +1406,7 @@ analysis_correlate() {
         /^mariadb_idle=1/   { mariadb++ }
         /^high_dstate=1/    { dstate++ }
         /^iowait_gt20=1/    { iowait++ }
+        /^steal_high=1/     { steal++ }
         /^psi_io_high=1/    { psiio++ }
         /^psi_mem_high=1/   { psimem++ }
         /^imunify_active=1/ { imunify++ }
@@ -1383,6 +1422,7 @@ analysis_correlate() {
             printf "  MariaDB idle ................. %d/%d\n", mariadb+0, total
             printf "  High D-state ................. %d/%d\n", dstate+0, total
             printf "  IO wait > 20%% ................ %d/%d\n", iowait+0, total
+            printf "  CPU steal (host contention) .. %d/%d\n", steal+0, total
             printf "  PSI io-full high ............. %d/%d\n", psiio+0, total
             printf "  PSI memory-full high ......... %d/%d\n", psimem+0, total
             printf "  Imunify active ............... %d/%d\n", imunify+0, total
@@ -1548,6 +1588,8 @@ analysis_generate() {
         else
             printf '  - PSI: not captured\n'
         fi
+        printf '  - Peak CPU steal: %s%%%s\n' "${W_MAX_STEAL:-0}" \
+            "$(num_gt "${W_MAX_STEAL:-0}" "${STEAL_NOTABLE_PCT:-5}" && printf ' (hypervisor contention — not our workload)' || printf '')"
         printf '  - Wait channels: %s\n' "$(analysis_evidence_state "$dir" "$SF_WCHAN_PRESENT")"
         printf '  - Kernel stacks: %s\n' "$(analysis_evidence_state "$dir" "$SF_STACK_PRESENT")"
         printf '\n'
@@ -1607,6 +1649,13 @@ analysis_generate() {
         analysis_next_steps "$SF_LEADER" | while IFS= read -r step; do
             printf '  - %s\n' "$step"
         done
+        # Steal points outside the machine, so it belongs in the next steps
+        # regardless of which internal subsystem led — the fix is not on this box.
+        if [[ "${SF_STEAL_HIGH:-0}" -eq 1 ]]; then
+            printf '  - CPU steal reached %s%%: raise this with the hosting provider.\n' "${W_MAX_STEAL:-0}"
+            printf '    Steal is the host scheduling another tenant onto our core; no change\n'
+            printf '    on this server can reduce it. Quote the incident window and this figure.\n'
+        fi
         printf '\n'
 
         printf 'Missing evidence to capture next time:\n'

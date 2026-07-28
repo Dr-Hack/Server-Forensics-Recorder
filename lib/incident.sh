@@ -89,6 +89,13 @@ incident_start() {
     incident_meta_set "$dir" peak_established "$(metric_value "$metric_line" tcp_established)"
     incident_meta_set "$dir" peak_dstate "$(metric_value "$metric_line" dstate_processes)"
     incident_meta_set "$dir" peak_iowait "$(metric_value "$metric_line" iowait_pct)"
+    # A metric line written before steal_pct existed has no such field. Default
+    # to 0 rather than storing an empty value, which would render as
+    # "Peak CPU Steal: %" in the summary. (incident_meta_set always writes a
+    # trailing newline, so the file is never zero-length — test the value.)
+    local initial_steal
+    initial_steal="$(metric_value "$metric_line" steal_pct || true)"
+    incident_meta_set "$dir" peak_steal "${initial_steal:-0}"
     # PSI peaks are captured from /proc/pressure during panic, not from the
     # lightweight metric line, so they start at 0 and are raised by
     # incident_update_psi_peaks as snapshots are taken.
@@ -120,9 +127,9 @@ incident_start() {
 incident_update_peaks() {
     local dir="$1"
     local metric_line="$2"
-    local load1 lsphp mem_available established dstate iowait
+    local load1 lsphp mem_available established dstate iowait steal
     local old_peak_load old_peak_lsphp old_low_mem old_peak_established
-    local old_peak_dstate old_peak_iowait
+    local old_peak_dstate old_peak_iowait old_peak_steal
 
     load1="$(metric_value "$metric_line" load1)"
     lsphp="$(metric_value "$metric_line" lsphp_count)"
@@ -130,6 +137,7 @@ incident_update_peaks() {
     established="$(metric_value "$metric_line" tcp_established)"
     dstate="$(metric_value "$metric_line" dstate_processes)"
     iowait="$(metric_value "$metric_line" iowait_pct)"
+    steal="$(metric_value "$metric_line" steal_pct)"
 
     old_peak_load="$(incident_meta_get "$dir" peak_load 0)"
     old_peak_lsphp="$(incident_meta_get "$dir" peak_lsphp 0)"
@@ -137,6 +145,7 @@ incident_update_peaks() {
     old_peak_established="$(incident_meta_get "$dir" peak_established 0)"
     old_peak_dstate="$(incident_meta_get "$dir" peak_dstate 0)"
     old_peak_iowait="$(incident_meta_get "$dir" peak_iowait 0)"
+    old_peak_steal="$(incident_meta_get "$dir" peak_steal 0)"
 
     incident_meta_set "$dir" peak_load "$(num_max "${load1:-0}" "${old_peak_load:-0}")"
     incident_meta_set "$dir" peak_lsphp "$(num_max "${lsphp:-0}" "${old_peak_lsphp:-0}")"
@@ -146,6 +155,10 @@ incident_update_peaks() {
     # transient NA never clobbers a real peak.
     incident_meta_set "$dir" peak_dstate "$(num_max "${dstate:-0}" "${old_peak_dstate:-0}")"
     incident_meta_set "$dir" peak_iowait "$(num_max "${iowait:-0}" "${old_peak_iowait:-0}")"
+    # Steal is the hypervisor taking the core from us. Tracked as a peak so an
+    # incident can be shown to have coincided with host contention we do not
+    # control, which is the one claim a provider cannot attribute back to us.
+    incident_meta_set "$dir" peak_steal "$(num_max "${steal:-0}" "${old_peak_steal:-0}")"
 }
 
 # Raises the tracked PSI peaks from a set of avg10 readings. Arguments, in the
@@ -219,6 +232,7 @@ incident_close() {
         printf 'Peak lsphp: %s\n' "$(incident_meta_get "$dir" peak_lsphp 0)"
         printf 'Peak D-state Processes: %s\n' "$(incident_meta_get "$dir" peak_dstate 0)"
         printf 'Peak IO Wait: %s%%\n' "$(incident_meta_get "$dir" peak_iowait 0)"
+        printf 'Peak CPU Steal: %s%%\n' "$(incident_meta_get "$dir" peak_steal 0)"
         printf 'Peak PSI io (full avg10): %s\n' "$(incident_meta_get "$dir" peak_psi_io_full 0)"
         printf 'Peak PSI cpu (some avg10): %s\n' "$(incident_meta_get "$dir" peak_psi_cpu_some 0)"
         printf 'Peak PSI memory (full avg10): %s\n' "$(incident_meta_get "$dir" peak_psi_mem_full 0)"

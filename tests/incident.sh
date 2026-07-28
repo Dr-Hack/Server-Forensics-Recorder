@@ -49,6 +49,16 @@ printf 'snapshot index reservation\n'
 DIR="$(incident_start "load1=10.20>10" "$METRIC")"
 assert_eq "$(incident_meta_get "$DIR" snapshots 0)" "0" "a new incident has no completed snapshots"
 
+# $METRIC predates steal_pct, exactly like every sample already on disk. The
+# peak must degrade to 0, not to an empty string that renders as "Steal: %".
+assert_eq "$(incident_meta_get "$DIR" peak_steal none)" "0" "a pre-steal metric line yields a zero peak, not an empty one"
+incident_update_peaks "$DIR" "${METRIC} steal_pct=37.5"
+assert_eq "$(incident_meta_get "$DIR" peak_steal 0)" "37.5" "steal peak is raised from a sample that has the field"
+incident_update_peaks "$DIR" "${METRIC} steal_pct=2.0"
+assert_eq "$(incident_meta_get "$DIR" peak_steal 0)" "37.5" "a quieter sample does not lower the steal peak"
+incident_update_peaks "$DIR" "$METRIC"
+assert_eq "$(incident_meta_get "$DIR" peak_steal 0)" "37.5" "a sample missing the field does not clobber the steal peak"
+
 i1="$(incident_reserve_snapshot_index "$DIR")"
 assert_eq "$i1" "1" "the first capture reserves index 1"
 

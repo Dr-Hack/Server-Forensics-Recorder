@@ -19,55 +19,74 @@ read_cpu_fields() {
     # single /proc/stat parse and one shared state file, so IO wait is effectively
     # free in the light path (no vmstat/iostat spawn required).
     #
-    # Output: "<busy_pct> <iowait_pct>", each a percentage or NA.
+    # Steal rides along on the same read. It is the one metric in a hosting
+    # dispute that cannot be attributed back to us: it counts time this vCPU was
+    # RUNNABLE but the hypervisor gave the physical core to another tenant. No
+    # workload of ours can produce it. Field 9 was already inside the line being
+    # summed for `total`, so capturing it costs nothing.
+    #
+    # Output: "<busy_pct> <iowait_pct> <steal_pct>", each a percentage or NA.
     local state_file="${STATE_DIR}/cpu_stat"
-    local cpu_now cur_total cur_idle cur_iowait prev_total prev_idle prev_iowait
+    local cpu_now cur_total cur_idle cur_iowait cur_steal
+    local prev_total prev_idle prev_iowait prev_steal
 
     cpu_now="$(awk '
         /^cpu / {
             total = 0
             for (i = 2; i <= NF; i++) total += $i
-            # /proc/stat cpu line: $2 user $3 nice $4 system $5 idle $6 iowait ...
-            printf "%d %d %d\n", total, $5, $6
+            # /proc/stat cpu line: $2 user $3 nice $4 system $5 idle $6 iowait
+            #                      $7 irq $8 softirq $9 steal $10 guest ...
+            # Kernels older than 2.6.11 have no steal column; report 0 there
+            # rather than reading past the end of the line.
+            printf "%d %d %d %d\n", total, $5, $6, (NF >= 9 ? $9 : 0)
             exit
         }
     ' /proc/stat 2>/dev/null || true)"
 
     if [[ -z "$cpu_now" ]]; then
-        printf 'NA NA\n'
+        printf 'NA NA NA\n'
         return 0
     fi
-    read -r cur_total cur_idle cur_iowait <<<"$cpu_now"
+    read -r cur_total cur_idle cur_iowait cur_steal <<<"$cpu_now"
 
     if [[ -r "$state_file" ]]; then
-        read -r prev_total prev_idle prev_iowait <"$state_file" 2>/dev/null || true
+        read -r prev_total prev_idle prev_iowait prev_steal <"$state_file" 2>/dev/null || true
     fi
 
-    printf '%s %s %s\n' "$cur_total" "$cur_idle" "$cur_iowait" >"$state_file" 2>/dev/null || true
+    printf '%s %s %s %s\n' "$cur_total" "$cur_idle" "$cur_iowait" "$cur_steal" \
+        >"$state_file" 2>/dev/null || true
 
     # An older two-field state file (total idle) leaves prev_iowait empty; treat
     # that as a missing baseline so the next sample re-establishes it cleanly.
     if [[ -z "${prev_total:-}" || -z "${prev_iowait:-}" ]]; then
-        printf 'NA NA\n'
+        printf 'NA NA NA\n'
         return 0
     fi
 
-    awk -v ct="$cur_total" -v ci="$cur_idle" -v cw="$cur_iowait" \
-        -v pt="$prev_total" -v pi="$prev_idle" -v pw="$prev_iowait" '
+    # A three-field state file is the pre-steal format. Busy and iowait still
+    # have their baseline, so only steal reports NA for the one cycle it takes
+    # to establish one — an upgrade must not blank metrics that already worked.
+    awk -v ct="$cur_total" -v ci="$cur_idle" -v cw="$cur_iowait" -v cs="$cur_steal" \
+        -v pt="$prev_total" -v pi="$prev_idle" -v pw="$prev_iowait" -v ps="${prev_steal:-}" '
+        function clamp(v) { return (v < 0 ? 0 : (v > 100 ? 100 : v)) }
         BEGIN {
             dt = ct - pt
-            if (dt <= 0) { print "NA NA"; exit }
+            if (dt <= 0) { print "NA NA NA"; exit }
             di = ci - pi
             dw = cw - pw
             # Busy excludes both idle and iowait, preserving the previous meaning
-            # where iowait was folded into idle.
-            busy = (dt - di - dw) / dt * 100
-            wait = dw / dt * 100
-            if (busy < 0) busy = 0
-            if (busy > 100) busy = 100
-            if (wait < 0) wait = 0
-            if (wait > 100) wait = 100
-            printf "%.1f %.1f\n", busy, wait
+            # where iowait was folded into idle. Steal is deliberately NOT
+            # subtracted: doing so would silently redefine cpu_busy_pct and make
+            # new samples incomparable with every incident already recorded. It
+            # is reported alongside instead, and the analysis notes the overlap
+            # when steal is high enough to matter.
+            busy = clamp((dt - di - dw) / dt * 100)
+            wait = clamp(dw / dt * 100)
+            if (ps == "") {
+                printf "%.1f %.1f NA\n", busy, wait
+            } else {
+                printf "%.1f %.1f %.1f\n", busy, wait, clamp((cs - ps) / dt * 100)
+            }
         }
     '
 }
@@ -258,7 +277,7 @@ read_psi_avg10() {
 }
 
 collect_metrics_line() {
-    local timestamp epoch uptime load1 load5 load15 cpu_busy iowait_pct
+    local timestamp epoch uptime load1 load5 load15 cpu_busy iowait_pct steal_pct
     local mem_total mem_available swap_total swap_free
     local apache_workers lsphp_count lsphp_avg_age lsphp_oldest_age
     local mariadb_running threads_running threads_connected
@@ -269,7 +288,7 @@ collect_metrics_line() {
     epoch="$(now_epoch)"
     uptime="$(read_uptime_seconds)"
     read -r load1 load5 load15 <<<"$(read_load_fields)"
-    read -r cpu_busy iowait_pct <<<"$(read_cpu_fields)"
+    read -r cpu_busy iowait_pct steal_pct <<<"$(read_cpu_fields)"
     read -r mem_total mem_available swap_total swap_free <<<"$(read_memory_fields)"
     apache_workers="$(read_apache_workers)"
     read -r lsphp_count lsphp_avg_age lsphp_oldest_age <<<"$(read_lsphp_fields)"
@@ -280,8 +299,8 @@ collect_metrics_line() {
     read -r tcp_established tcp_time_wait tcp_close_wait tcp_syn_recv <<<"$(read_tcp_summary)"
     dstate="$(read_dstate_processes)"
 
-    printf 'timestamp=%s epoch=%s uptime_seconds=%s load1=%s load5=%s load15=%s cpu_busy_pct=%s iowait_pct=%s mem_total_mb=%s mem_available_mb=%s swap_total_mb=%s swap_free_mb=%s apache_workers=%s lsphp_count=%s lsphp_avg_age=%s lsphp_oldest_age=%s mariadb_running=%s threads_running=%s threads_connected=%s mysql_questions=%s mysql_uptime_seconds=%s mysql_slow_queries=%s exim_queue=%s tcp_established=%s tcp_time_wait=%s tcp_close_wait=%s tcp_syn_recv=%s dstate_processes=%s%s\n' \
-        "$timestamp" "$epoch" "$uptime" "$load1" "$load5" "$load15" "$cpu_busy" "$iowait_pct" \
+    printf 'timestamp=%s epoch=%s uptime_seconds=%s load1=%s load5=%s load15=%s cpu_busy_pct=%s iowait_pct=%s steal_pct=%s mem_total_mb=%s mem_available_mb=%s swap_total_mb=%s swap_free_mb=%s apache_workers=%s lsphp_count=%s lsphp_avg_age=%s lsphp_oldest_age=%s mariadb_running=%s threads_running=%s threads_connected=%s mysql_questions=%s mysql_uptime_seconds=%s mysql_slow_queries=%s exim_queue=%s tcp_established=%s tcp_time_wait=%s tcp_close_wait=%s tcp_syn_recv=%s dstate_processes=%s%s\n' \
+        "$timestamp" "$epoch" "$uptime" "$load1" "$load5" "$load15" "$cpu_busy" "$iowait_pct" "$steal_pct" \
         "$mem_total" "$mem_available" "$swap_total" "$swap_free" "$apache_workers" \
         "$lsphp_count" "$lsphp_avg_age" "$lsphp_oldest_age" "$mariadb_running" \
         "$threads_running" "$threads_connected" "$mysql_questions" "$mysql_uptime" \

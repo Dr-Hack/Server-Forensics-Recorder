@@ -272,6 +272,14 @@ Examples of collected fields:
 - CPU busy percentage (delta of `/proc/stat` between samples; `NA` on the first
   sample after boot)
 - IO wait percentage (from the same `/proc/stat` delta; no extra process spawned)
+- **CPU steal percentage** (same delta, still no extra process) — time this vCPU
+  was runnable while the hypervisor ran another tenant on the physical core. It
+  is the one metric in a hosting dispute that cannot be attributed back to the
+  customer, because no local workload can produce it. Note that `cpu_busy_pct`
+  counts stolen time as busy; that definition is kept for comparability with
+  previously recorded incidents, and the analysis states the overlap explicitly
+  whenever steal is high enough to matter, so a steal event is never silently
+  scored as CPU saturation
 - Memory and swap
 - Apache worker count
 - `lsphp` process count

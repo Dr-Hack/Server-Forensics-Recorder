@@ -453,6 +453,81 @@ else
     fail "stale capture still named a specific cause (got '${pm_pct}')"
 fi
 
+# --- CPU steal / hypervisor contention ----------------------------------------
+# Steal is the one metric a hosting provider cannot attribute back to the
+# customer, so it must survive into the report intact, and the fact that
+# cpu_busy_pct counts stolen time as busy must be stated rather than left to
+# silently inflate a CPU-saturation verdict.
+printf 'test: CPU steal is reported as host contention\n'
+DIR_G="${INCIDENT_DIR}/incident-G"
+mkdir -p "$DIR_G"
+incident_meta_set "$DIR_G" id incident-G
+incident_meta_set "$DIR_G" started_epoch 1000006000
+incident_meta_set "$DIR_G" ended_epoch "$((1000006000 + 120))"
+incident_meta_set "$DIR_G" reason "load1=18.4>10"
+incident_meta_set "$DIR_G" peak_load 18.4
+incident_meta_set "$DIR_G" peak_dstate 2
+incident_meta_set "$DIR_G" peak_iowait 12.0
+incident_meta_set "$DIR_G" peak_steal 41.5
+{
+    printf 'timestamp=x epoch=%s load1=3.0 cpu_busy_pct=9.0 iowait_pct=2.0 steal_pct=1.0 dstate_processes=0 apache_workers=7 threads_running=1 mem_available_mb=3000\n' 1000006000
+    printf 'timestamp=x epoch=%s load1=18.4 cpu_busy_pct=88.0 iowait_pct=12.0 steal_pct=41.5 dstate_processes=2 apache_workers=7 threads_running=1 mem_available_mb=2900\n' "$((1000006000 + 60))"
+    printf 'timestamp=x epoch=%s load1=2.0 cpu_busy_pct=8.0 iowait_pct=1.0 steal_pct=0.5 dstate_processes=0 apache_workers=7 threads_running=1 mem_available_mb=3000\n' "$((1000006000 + 120))"
+} >"$CURRENT_LOG"
+
+analysis_generate "$DIR_G" >/dev/null
+G="${DIR_G}/analysis.txt"
+
+assert_contains "$G" "Peak CPU steal: 41.5%" "peak steal is an observed fact"
+assert_contains "$G" "hypervisor contention" "steal is labelled as host contention"
+assert_contains "$G" "not our workload" "the report states steal is not caused by our load"
+assert_contains "$G" "cpu_busy_pct includes stolen time" "the cpu_busy_pct overlap is disclosed, not left implicit"
+assert_contains "$G" "raise this with the hosting provider" "high steal produces a provider action item"
+# The verdict itself must be challenged, not just footnoted: a CPU-saturation
+# conclusion drawn from inflated numbers sends the reader after their own
+# processes for a problem they cannot fix.
+assert_contains "$G" "Competing explanation" "a CPU-saturation verdict under high steal is challenged in the ledger"
+assert_contains "$G" "STOLEN by the hypervisor" "the ledger names stolen time as the competing explanation"
+
+# Steal must be picked up from the window scan, not only from the meta peak,
+# so a regenerated analysis of an older incident still finds it.
+DIR_H="${INCIDENT_DIR}/incident-H"
+mkdir -p "$DIR_H"
+incident_meta_set "$DIR_H" id incident-H
+incident_meta_set "$DIR_H" started_epoch 1000006000
+incident_meta_set "$DIR_H" ended_epoch "$((1000006000 + 120))"
+incident_meta_set "$DIR_H" reason "load1=18.4>10"
+incident_meta_set "$DIR_H" peak_load 18.4
+analysis_generate "$DIR_H" >/dev/null
+assert_contains "${DIR_H}/analysis.txt" "Peak CPU steal: 41.5" "steal is recovered from the sample window when no meta peak exists"
+
+# A quiet box must not be accused of host contention.
+printf 'test: low steal is not flagged\n'
+DIR_I="${INCIDENT_DIR}/incident-I"
+mkdir -p "$DIR_I"
+incident_meta_set "$DIR_I" id incident-I
+incident_meta_set "$DIR_I" started_epoch 1000007000
+incident_meta_set "$DIR_I" ended_epoch "$((1000007000 + 60))"
+incident_meta_set "$DIR_I" reason "load1=11>10"
+incident_meta_set "$DIR_I" peak_load 11
+incident_meta_set "$DIR_I" peak_steal 0.3
+{
+    printf 'timestamp=x epoch=%s load1=11.0 cpu_busy_pct=70.0 iowait_pct=1.0 steal_pct=0.3 dstate_processes=0 apache_workers=7 threads_running=1 mem_available_mb=3000\n' 1000007000
+} >"$CURRENT_LOG"
+analysis_generate "$DIR_I" >/dev/null
+I="${DIR_I}/analysis.txt"
+assert_contains "$I" "Peak CPU steal: 0.3%" "low steal is still reported as a measurement"
+if grep -q "hosting provider" "$I"; then
+    fail "low steal must not produce a provider action item"
+else
+    pass "low steal produces no provider action item"
+fi
+if grep -q "cpu_busy_pct includes stolen time" "$I"; then
+    fail "the cpu_busy_pct caveat must not appear when steal is negligible"
+else
+    pass "the cpu_busy_pct caveat is omitted when steal is negligible"
+fi
+
 if [[ "$FAILURES" -gt 0 ]]; then
     printf 'analysis tests FAILED: %s\n' "$FAILURES" >&2
     exit 1

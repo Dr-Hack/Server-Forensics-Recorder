@@ -93,6 +93,17 @@ subsystem). On a uniformly slow disk there is no single stuck file; the wait
   diagnostics and caught nothing in 8 consecutive attempts, because blocked tasks
   clear in seconds. Note that even a zero-lag panic capture cannot outrun a
   sub-minute stall — the ring buffer's `kind=wchan` rows are the reliable source.
+- `STEAL_NOTABLE_PCT`: Peak CPU steal (%) above which an incident is flagged as
+  coinciding with hypervisor contention. Steal is time the vCPU was runnable
+  while the host gave the physical core to another tenant — produced by the
+  provider's overcommit, impossible to cause from inside the guest, and
+  therefore the one figure in a hosting dispute that cannot be turned back on
+  the customer. Sustained single-digit steal is normal on a shared VPS; double
+  digits is not. Above the threshold the analysis records it as an observed fact,
+  annotates the affected rows of the timeline (giving exact timestamps to quote),
+  counts it across incidents in the recurring-patterns block, adds a provider
+  action item, and — if the leading verdict is CPU saturation — challenges that
+  verdict in the ledger, since `cpu_busy_pct` counts stolen time as busy.
 - `STALE_CAPTURE_SECONDS`: How long after the trigger a per-process capture may
   land and still be treated as evidence *of* that incident. Beyond this the
   offender tables are still printed, but specific-cause confidence is held at the
