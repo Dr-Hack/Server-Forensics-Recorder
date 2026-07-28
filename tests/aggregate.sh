@@ -317,16 +317,17 @@ fi
 # The single-account production case: many lsphp workers, all named "lsphp", each
 # serving a different WordPress endpoint. mod_lsapi rewrites argv to
 # "lsphp:<script>" and front-truncates long paths; only the tail survives. Shape
-# of `ps -eo pid=,comm=,pcpu=,rss=,stat=,args=` on el8.
+# of `ps -eo pid=,comm=,pcpu=,rss=,stat=,wchan=,args=` on el8. wchan sits between
+# stat and args as a single token ("-" when the task is not blocked).
 printf 'PHP endpoint attribution\n'
 {
-    printf ' 589246 lsphp            80.0  31200 R lsphp:/home/drhackne/cryptoawaz.com/index.php\n'
-    printf ' 589236 lsphp            77.0  31000 R lsphp:ackne/cryptoawaz.com/wp-admin/admin-post.php\n'
-    printf ' 589245 lsphp            60.0  30000 R lsphp:kne/public_html/blog/wp-admin/admin-ajax.php\n'
-    printf ' 589250 lsphp            55.0  30000 R lsphp:kne/public_html/blog/wp-admin/admin-ajax.php?action=x\n'
-    printf ' 588652 lsphp             0.0  20000 S lsphp\n'
-    printf '  39327 mariadbd          3.4 220000 S /usr/sbin/mariadbd\n'
-    printf '      1 systemd           0.0   9240 S /usr/lib/systemd/systemd --system\n'
+    printf ' 589246 lsphp            80.0  31200 R - lsphp:/home/drhackne/cryptoawaz.com/index.php\n'
+    printf ' 589236 lsphp            77.0  31000 R - lsphp:ackne/cryptoawaz.com/wp-admin/admin-post.php\n'
+    printf ' 589245 lsphp            60.0  30000 R - lsphp:kne/public_html/blog/wp-admin/admin-ajax.php\n'
+    printf ' 589250 lsphp            55.0  30000 R - lsphp:kne/public_html/blog/wp-admin/admin-ajax.php?action=x\n'
+    printf ' 588652 lsphp             0.0  20000 S - lsphp\n'
+    printf '  39327 mariadbd          3.4 220000 S - /usr/sbin/mariadbd\n'
+    printf '      1 systemd           0.0   9240 S - /usr/lib/systemd/systemd --system\n'
 } >"${WORK}/psargs.txt"
 
 php_parsed="$(ring_format <"${WORK}/psargs.txt")"
@@ -356,6 +357,80 @@ else
     pass "idle lsphp workers are excluded from endpoint rows"
 fi
 
+# --- kernel wait channels from the ring ---------------------------------------
+# Regression guard for the defect that cost 34 consecutive incidents their
+# wait-channel evidence: the panic-time sampler starts 13-29s after the trigger
+# and blocked tasks have cleared by then. The ring samples continuously, so it
+# catches them — but only if wchan is actually parsed out of the ps row and only
+# if a blocked PHP worker can be tied to the channel it is blocked in.
+printf 'kernel wait channels from the ring\n'
+{
+    printf ' 589246 lsphp            62.0  31200 D jbd2_log_wait_commit lsphp:/home/drhackne/cryptoawaz.com/wp-admin/admin-ajax.php\n'
+    printf ' 589247 lsphp            40.0  31200 D wait_on_page_writeback lsphp:ackne/cryptoawaz.com/index.php\n'
+    printf ' 589248 lsphp            10.0  31200 S - lsphp:ackne/cryptoawaz.com/index.php\n'
+    printf '  39327 mariadbd          7.8 220000 D jbd2_log_wait_commit /usr/sbin/mariadbd\n'
+    printf '  36527 imunify-residen  21.4  45000 R - /usr/bin/imunify-resident\n'
+} >"${WORK}/pswchan.txt"
+
+RINGBUFFER_TOP_PHP=10
+wchan_parsed="$(ring_format <"${WORK}/pswchan.txt")"
+
+assert_contains "$wchan_parsed" "kind=wchan" "blocked tasks emit wait-channel rows"
+jbd2_row="$(printf '%s\n' "$wchan_parsed" | awk '/kind=wchan/ && /chan=jbd2_log_wait_commit/')"
+assert_contains "$jbd2_row" "procs=2" "a channel shared by two processes is counted once with both"
+
+# Unblocked processes must never contribute a channel, or every idle sample
+# would manufacture evidence of a stall.
+if printf '%s\n' "$wchan_parsed" | grep -q 'kind=wchan.*chan=-'; then
+    fail "the not-blocked placeholder must not become a wait channel"
+else
+    pass "unblocked tasks contribute no wait channel"
+fi
+if printf '%s\n' "$wchan_parsed" | awk '/kind=wchan/' | grep -q 'comm=imunify-residen'; then
+    fail "a running (R) process must not appear as blocked"
+else
+    pass "running processes are excluded from wait-channel rows"
+fi
+
+# The join that names the culprit: endpoint plus the channel it blocked in.
+ajax_blocked="$(printf '%s\n' "$wchan_parsed" | awk '/kind=php/ && /script=wp-admin\/admin-ajax.php/')"
+assert_contains "$ajax_blocked" "dstate=1" "a blocked PHP worker is counted against its endpoint"
+assert_contains "$ajax_blocked" "wchan=jbd2_log_wait_commit" "the endpoint carries the channel it was blocked in"
+
+idx_blocked="$(printf '%s\n' "$wchan_parsed" | awk '/kind=php/ && /script=cryptoawaz.com\/index.php/')"
+assert_contains "$idx_blocked" "dstate=1" "only the blocked worker of an endpoint counts, not its idle sibling"
+assert_contains "$idx_blocked" "wchan=wait_on_page_writeback" "a second endpoint keeps its own distinct channel"
+
+# A healthy box must add no wait-channel rows at all — this is what keeps the
+# ring's steady-state cost at one ps per minute with nothing to store.
+healthy="$(ring_format <"${WORK}/psargs.txt")"
+if printf '%s\n' "$healthy" | grep -q 'kind=wchan'; then
+    fail "an unblocked sample must not emit wait-channel rows"
+else
+    pass "an unblocked sample emits no wait-channel rows"
+fi
+
+# Window aggregation over the ring.
+NOW_W="$(date +%s)"
+: >"${WORK}/ringw.log"
+{
+    printf 'ts=%s iso=x kind=wchan chan=jbd2_log_wait_commit procs=3 comm=lsphp\n' "$((NOW_W - 60))"
+    printf 'ts=%s iso=x kind=wchan chan=jbd2_log_wait_commit procs=7 comm=lsphp\n' "$((NOW_W - 30))"
+    printf 'ts=%s iso=x kind=wchan chan=wait_on_page_writeback procs=2 comm=mariadbd\n' "$((NOW_W - 30))"
+    printf 'ts=%s iso=x kind=php script=wp-admin/admin-ajax.php procs=4 cpu=200.00 dstate=3 wchan=jbd2_log_wait_commit\n' "$((NOW_W - 30))"
+} >"${WORK}/ringw.log"
+LOG_DIR="$WORK"
+mv "${WORK}/ringw.log" "${WORK}/procring.log"
+
+w_agg="$(ring_window_by_wchan "$((NOW_W - 120))" "$((NOW_W + 60))")"
+top_w="$(printf '%s\n' "$w_agg" | head -n 1)"
+assert_eq "$(printf '%s' "$top_w" | cut -f1)" "jbd2_log_wait_commit" "channels rank by peak blocked count"
+assert_eq "$(printf '%s' "$top_w" | cut -f2)" "7" "peak blocked count is the maximum, not the last value"
+
+pw="$(ring_window_php_wchan "$((NOW_W - 120))" "$((NOW_W + 60))")"
+assert_contains "$pw" "wp-admin/admin-ajax.php" "the endpoint-to-channel join survives window aggregation"
+assert_contains "$pw" "jbd2_log_wait_commit" "the joined row keeps its channel"
+
 # Endpoint rows respect their cap.
 RINGBUFFER_TOP_PHP=1
 capped_php="$(ring_format <"${WORK}/psargs.txt")"
@@ -381,23 +456,43 @@ assert_eq "$(printf '%s\n' "$by_php" | head -n 1 | cut -f1)" "wp-admin/admin-aja
 
 # The accelerate check must read load without failing on an odd environment.
 printf 'ring acceleration check\n'
+# The real reader is measured here, before the stub below replaces it for the
+# watermark cases.
+# shellcheck disable=SC2218  # intentional: real function first, stub afterwards
 load="$(ring_load1)"
 if [[ "$load" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     pass "ring_load1 returns a numeric load (${load})"
 else
     fail "ring_load1 returned a non-numeric value: '${load}'"
 fi
+# The watermark comparison is tested against a stubbed load rather than the
+# machine's real one. Reading /proc/loadavg here made the result depend on how
+# busy the test host happened to be: on an idle runner the "above the watermark"
+# case reads 0.00 and fails, which is a property of the runner, not the code.
+ring_load1() { printf '%s\n' "${STUB_LOAD:-0.00}"; }
+
+STUB_LOAD=0.50
 RINGBUFFER_FAST_LOAD=999999
 if ring_should_accelerate; then
     fail "acceleration must not trigger below the watermark"
 else
     pass "acceleration suppressed below the watermark"
 fi
-RINGBUFFER_FAST_LOAD=0
+
+STUB_LOAD=7.25
+RINGBUFFER_FAST_LOAD=3
 if ring_should_accelerate; then
     pass "acceleration triggers above the watermark"
 else
     fail "acceleration should trigger above the watermark"
+fi
+
+# The boundary: the watermark is a threshold to exceed, not to reach.
+STUB_LOAD=3.00
+if ring_should_accelerate; then
+    fail "load exactly at the watermark must not accelerate"
+else
+    pass "load exactly at the watermark does not accelerate"
 fi
 
 if [[ "$FAILURES" -gt 0 ]]; then

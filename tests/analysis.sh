@@ -358,6 +358,101 @@ else
     fail "corroborated maintenance still capped (got '${maint_pct_d}')"
 fi
 
+# --- capture provenance -------------------------------------------------------
+# The reporting defect behind incident-20260728-143130: the sampler ran
+# correctly and found nothing, and the report called that "unavailable" — which
+# reads as a broken or unprivileged recorder and sends the reader to fix the
+# wrong thing. A successful-but-empty capture is a measurement and must be
+# reported as one.
+printf 'test: empty-but-successful rapid sampling is distinguished from a missing capability\n'
+DIR_E="${INCIDENT_DIR}/incident-E"
+mkdir -p "$DIR_E"
+incident_meta_set "$DIR_E" id incident-E
+incident_meta_set "$DIR_E" started_epoch 1000004000
+incident_meta_set "$DIR_E" ended_epoch 1000004120
+incident_meta_set "$DIR_E" reason "dstate=8>5"
+incident_meta_set "$DIR_E" peak_load 6.48
+incident_meta_set "$DIR_E" peak_dstate 8
+incident_meta_set "$DIR_E" peak_iowait 53.7
+incident_meta_set "$DIR_E" peak_psi_io_full 49.4
+# The sampler ran six times, caught nothing, and started 29s after the trigger —
+# the exact production numbers.
+incident_meta_set "$DIR_E" dstate_sampler_samples 6
+incident_meta_set "$DIR_E" dstate_sampler_pids 0
+incident_meta_set "$DIR_E" dstate_sampler_stacks 0
+incident_meta_set "$DIR_E" dstate_sampler_syscalls 0
+incident_meta_set "$DIR_E" dstate_sampler_lag 29
+incident_meta_set "$DIR_E" capture_lag_min 29
+{
+    printf 'Server Forensics D-state / Blocking Snapshot\n'
+    printf '\n\n===== ps wchan (D-state only) sample 1/6 =====\n'
+    printf 'PID USER STAT WCHAN COMM ARGS\n'
+    printf '\n\n===== PSI (pressure stall information) =====\n'
+    printf -- '--- /proc/pressure/io ---\n'
+    printf 'full avg10=49.40 avg60=38.00 avg300=9.00 total=100000\n'
+} >"${DIR_E}/dstate-1.log"
+
+seed_window 1000004000
+analysis_generate "$DIR_E" >/dev/null
+E="${DIR_E}/analysis.txt"
+
+assert_contains "$E" "Rapid D-state sampling: completed, 6 samples" "the sampler reports that it ran, and how many times"
+assert_contains "$E" "Unique D-state processes observed: 0" "the sampler reports what it observed"
+assert_contains "$E" "Capture began 29s after the incident trigger" "the capture lag is stated"
+assert_contains "$E" "TRANSIENT" "an empty capture is explained as a transient stall, not a limitation"
+assert_contains "$E" "no D-state tasks observed during rapid sampling" "the ledger says what was measured, not that it was unavailable"
+
+if grep -q 'Wait channels: unavailable' "$E"; then
+    fail "a successful-but-empty capture must not be reported as 'unavailable'"
+else
+    pass "a successful-but-empty capture is not reported as 'unavailable'"
+fi
+
+# --- stale capture guard ------------------------------------------------------
+# incident-20260728-183224: the sole snapshot landed 3h27m after the trigger,
+# during an unrelated nightly dnf run, and "Package manager" was named as the
+# cause of a storage stall that had ended three hours earlier.
+printf 'test: a capture taken long after the trigger cannot name a specific cause\n'
+DIR_F="${INCIDENT_DIR}/incident-F"
+mkdir -p "$DIR_F"
+incident_meta_set "$DIR_F" id incident-F
+incident_meta_set "$DIR_F" started_epoch 1000005000
+incident_meta_set "$DIR_F" ended_epoch "$((1000005000 + 12455))"
+incident_meta_set "$DIR_F" reason "load1=10.20>10"
+incident_meta_set "$DIR_F" peak_load 21.79
+incident_meta_set "$DIR_F" peak_dstate 6
+incident_meta_set "$DIR_F" peak_iowait 81.8
+incident_meta_set "$DIR_F" peak_psi_io_full 3.82
+incident_meta_set "$DIR_F" dstate_sampler_samples 6
+incident_meta_set "$DIR_F" dstate_sampler_pids 0
+incident_meta_set "$DIR_F" dstate_sampler_lag 12430
+incident_meta_set "$DIR_F" capture_lag_min 12430
+cat >"${DIR_F}/dstate-1.log" <<'EOF'
+Server Forensics D-state / Blocking Snapshot
+
+
+===== maintenance/package processes (detected) =====
+PID PPID USER STAT ETIMES COMM ARGS
+2998923 1 root R 40 dnf /usr/bin/dnf update -y
+EOF
+printf '2998923\tdnf\t71.41\t352.00\t8351.13\t1\t8\t17.8\n' >"${DIR_F}/offenders-1.tsv"
+: >"${DIR_F}/cpuoffenders-1.tsv"
+
+seed_window 1000005000
+analysis_generate "$DIR_F" >/dev/null
+F="${DIR_F}/analysis.txt"
+
+assert_contains "$F" "Capture staleness" "a stale capture is flagged in the ledger"
+assert_contains "$F" "12430s after the trigger" "the staleness distance is stated"
+assert_contains "$F" "DIFFERENT event" "the reader is warned the capture may describe another event"
+
+pm_pct="$(grep -oE 'Package manager \.+ +[0-9]+%' "$F" | grep -oE '[0-9]+%' | tr -d '%')"
+if [[ -n "$pm_pct" && "$pm_pct" -le 15 ]]; then
+    pass "a stale capture cannot push a specific cause above the floor (${pm_pct}%)"
+else
+    fail "stale capture still named a specific cause (got '${pm_pct}')"
+fi
+
 if [[ "$FAILURES" -gt 0 ]]; then
     printf 'analysis tests FAILED: %s\n' "$FAILURES" >&2
     exit 1

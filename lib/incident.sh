@@ -179,6 +179,21 @@ incident_increment_snapshots() {
     printf '%s\n' "$current"
 }
 
+# Reserves the next snapshot index and returns it. Deliberately separate from
+# the `snapshots` counter, which records COMPLETED captures: a capture that dies
+# part-way must not hand its index back, or the next attempt overwrites the
+# partial output. On production incident-20260728-183224 exactly that happened —
+# a capture died 13s in, and the retry 3.5 hours later reused index 1 and
+# overwrote the only evidence of what had crashed.
+incident_reserve_snapshot_index() {
+    local dir="$1"
+    local seq
+    seq="$(incident_meta_get "$dir" snapshot_seq 0)"
+    seq=$((seq + 1))
+    incident_meta_set "$dir" snapshot_seq "$seq"
+    printf '%s\n' "$seq"
+}
+
 incident_close() {
     local dir="$1"
     local final_metric_line="$2"

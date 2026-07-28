@@ -2,6 +2,82 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.6.0 — 2026-07-29
+
+0.5.2 added rapid D-state sampling to answer "what were the blocked tasks
+waiting on". Four consecutive production incidents then reported
+`no D-state processes caught across 6 samples` — **8 captures out of 8**, and
+`Wait channel captured 0/34` across every incident on record.
+
+The sampler was not broken. It was arriving too late. On
+`incident-20260728-143130`, which was triggered *by* D-state (8 blocked tasks),
+section timestamps show the capture order cost 29 seconds before the sampler
+ran — `vmstat 1 5` (4s), `iostat -xz 1 3` (2s), `ss -antp` (**17s**), `lsof -nP`
+(6s) — by which point every blocked task had cleared. The most perishable
+evidence in the system was queued behind the least perishable.
+
+### Fixed
+
+- **Capture order is now by perishability.** The D-state/wchan/stack capture and
+  PSI run *first* in a panic snapshot, before anything with a sampling window or
+  a full-`/proc` walk. `ss -antp` and `lsof -nP`, the two slowest collectors
+  observed, run last. Measured lag drops from 13-29s to under a second.
+- **Orphaned incidents are closed by the watcher.** `incident_close` was
+  reachable only from the panic loop, so any death of `panic.sh` left an
+  incident open until the next unhealthy tick adopted it — and judged it against
+  an unrelated event. `incident-20260728-183224` stayed open **3h27m** and was
+  scored as "Package manager" on the strength of a nightly `dnf` run that began
+  three hours after its trigger; `incident-20260728-143917` did the same for
+  3h13m. The watcher now sweeps an active incident whenever the server is
+  healthy, via `panic.sh --finalize`.
+- **A failed capture no longer has its evidence overwritten.** Snapshot indices
+  are reserved from a monotonic counter (`snapshot_seq`) separate from the
+  completed-capture count, so a retry cannot reuse the index of a capture that
+  died and overwrite its partial output — which is how the only record of the
+  183224 crash was lost.
+- **`panic.sh` reports where it died.** `set -E` was enabled with no `ERR` trap,
+  so a mid-capture failure surfaced only as systemd's `status=1/FAILURE`, naming
+  neither command nor line. The trap now logs both.
+- **The expensive captures cannot abort the snapshot.** `capture_forensics` and
+  `capture_io_forensics` were unguarded calls under `set -e`.
+- **Ring buffer acceleration test no longer depends on host load.** It read
+  `/proc/loadavg`, so the "above the watermark" case failed on an idle runner.
+
+### Added
+
+- **Continuous wait-channel capture in the ring buffer.** `wchan` now rides
+  along on the `ps` the ring already runs every cycle, so it costs **no
+  additional process**. This is the structural fix: the ring is already sampling
+  before the panic threshold is crossed, so it catches blocked tasks the
+  panic-time sampler cannot. New `kind=wchan` rows, emitted only when something
+  is actually blocked, so an idle server stores nothing. `RINGBUFFER_TOP_WCHAN`.
+- **Endpoint-to-wait-channel attribution.** `kind=php` ring rows now carry
+  `dstate` and `wchan`, and the panic sampler records the served script for each
+  blocked PID. The report gains a *Blocked-task attribution* section answering
+  "which request was waiting on what" — the step from "a filesystem stall
+  occurred" to "the worker serving `wp-admin/admin-ajax.php` was blocked in
+  `jbd2_log_wait_commit`". Labelled as co-occurrence, not causation: mod_lsapi
+  does not expose the request URI to the process layer.
+- **Capture provenance in the analysis.** A new *Capture* section reports what
+  the sampler did — samples taken, unique D-state processes observed, stacks and
+  syscalls captured, and **how many seconds after the trigger it started**.
+- **Stale-capture guard.** When the nearest per-process capture lands more than
+  `STALE_CAPTURE_SECONDS` (default 300) after the trigger, specific-cause
+  confidence is held at the inconclusive floor and the ledger says why. This
+  alone would have prevented the "Package manager 38%" verdict on 183224.
+
+### Changed
+
+- **"unavailable" no longer describes a successful empty capture.** A sampler
+  that ran six times and found nothing now reports *"none observed — sampler
+  ran, no tasks were blocked during its window"*, and the ledger records *"no
+  D-state tasks observed during rapid sampling (transient stall)"*. The old
+  wording implied a missing capability or a permissions problem and sent readers
+  to fix the wrong thing. Where periodic sampling saw blocking that the rapid
+  sampler missed, the report reconciles the two and states that the stall was
+  transient and had already recovered — which bounds its duration instead of
+  leaving it unknown.
+
 ## 0.5.2 — 2026-07-28
 
 Answering "**what** were the blocked tasks waiting on", not just "that they were

@@ -87,7 +87,17 @@ subsystem). On a uniformly slow disk there is no single stuck file; the wait
 - `PANIC_DSTATE_MAX_PIDS`: Cap on how many D-state PIDs get a kernel-stack read
   per snapshot, so a storm of blocked tasks cannot make the recorder fan out.
 - `PANIC_DSTATE_SAMPLES`, `PANIC_DSTATE_INTERVAL`: How many times, and how far
-  apart, the D-state set is sampled to catch the transient blockers.
+  apart, the D-state set is sampled to catch the transient blockers. Since 0.6.0
+  this capture runs **first** in a panic snapshot, ahead of every collector with
+  a sampling window or a full-`/proc` walk: it previously ran after ~29s of other
+  diagnostics and caught nothing in 8 consecutive attempts, because blocked tasks
+  clear in seconds. Note that even a zero-lag panic capture cannot outrun a
+  sub-minute stall — the ring buffer's `kind=wchan` rows are the reliable source.
+- `STALE_CAPTURE_SECONDS`: How long after the trigger a per-process capture may
+  land and still be treated as evidence *of* that incident. Beyond this the
+  offender tables are still printed, but specific-cause confidence is held at the
+  inconclusive floor and the ledger states why. Guards against scoring an
+  incident on something that happened long after the event that opened it.
 - `PANIC_DSTATE_READ_TIMEOUT`: Per-PID timeout for each `/proc/<pid>/{syscall,stack}`
   read, so a deeply-blocked task can never stall the recorder.
 - `PANIC_CAPTURE_PSI`: Capture PSI (Pressure Stall Information) from
@@ -215,6 +225,14 @@ metric cadence to poll-window + 60s.
   aggregates as `wp-admin/admin-post.php`) and ranks workers by endpoint. On a
   single-account host this is the actionable unit: "`lsphp` at 68000% CPU" tells
   you nothing, "`wp-admin/admin-ajax.php`, 15 workers" tells you the request.
+- `RINGBUFFER_TOP_WCHAN`: Kernel wait-channel rows kept per sample. `wchan` is
+  read as part of the `ps` the ring already runs, so continuous wait-channel
+  capture costs **no additional process**. This matters because the panic-time
+  sampler cannot win the race: load1 lags, the watcher runs every 60s, and panic
+  mode starts after that, whereas the ring is already sampling on the way up.
+  Rows are emitted only when something is actually blocked, so an idle server
+  writes none. `kind=php` rows additionally carry `dstate` and `wchan`, which is
+  what lets a report say which *request* was waiting in which kernel subsystem.
 
 View it with `server-forensics --runup [ID]` for an incident, or
 `server-forensics --ring [N]` for the live buffer. The busiest endpoint also

@@ -66,12 +66,20 @@ ring_sample() {
     # suite. A parser that can only be exercised on the target host is a parser
     # that ships broken — see docs/decisions.md.
     #
+    # `wchan=` rides along on the ps that was already being run, so continuous
+    # wait-channel capture costs zero additional processes. This is the only way
+    # the wait channel is ever caught: the panic-time sampler starts 13-29s after
+    # the trigger and blocked tasks are gone by then (0 captures in 34 incidents),
+    # whereas the ring is already sampling before the threshold is crossed. It is
+    # a single token (a kernel symbol, "-", or "0"), so it cannot disturb the
+    # fixed-position fields.
+    #
     # `args=` is captured LAST because it is the only variable-width field: fields
-    # 1-5 stay fixed-position and everything from field 6 on is the command line.
+    # 1-6 stay fixed-position and everything from field 7 on is the command line.
     # It carries the mod_lsapi worker's rewritten argv ("lsphp:<script>"), which is
     # the ONLY place the PHP endpoint is visible — pidstat and comm both show a
     # bare "lsphp". On a single-account box the endpoint is the actionable unit.
-    ps -eo pid=,comm=,pcpu=,rss=,stat=,args= 2>/dev/null | ring_format >>"$file" 2>/dev/null || return 0
+    ps -eo pid=,comm=,pcpu=,rss=,stat=,wchan=,args= 2>/dev/null | ring_format >>"$file" 2>/dev/null || return 0
 
     return 0
 }
@@ -80,13 +88,15 @@ ring_sample() {
 # Fields 1-5 are fixed; field 6 onward is the command line (args=), which is
 # optional — captured input without it (older fixtures) simply yields no PHP rows.
 ring_format() {
-    local now top_execs top_pids top_php
+    local now top_execs top_pids top_php top_wchan
     now="$(now_epoch)"
     top_execs="${RINGBUFFER_TOP_EXECS:-15}"
     top_pids="${RINGBUFFER_TOP_PIDS:-10}"
     top_php="${RINGBUFFER_TOP_PHP:-10}"
+    top_wchan="${RINGBUFFER_TOP_WCHAN:-8}"
 
-    awk -v now="$now" -v iso="$(now_iso)" -v nexec="$top_execs" -v npid="$top_pids" -v nphp="$top_php" '
+    awk -v now="$now" -v iso="$(now_iso)" -v nexec="$top_execs" -v npid="$top_pids" \
+        -v nphp="$top_php" -v nwchan="$top_wchan" '
         # Extracts a stable PHP endpoint key from a worker command line. mod_lsapi
         # rewrites argv to "lsphp:<script path>" and overwrites it IN PLACE, so a
         # long path is FRONT-truncated ("ackne/site.com/wp-admin/admin-post.php").
@@ -116,7 +126,7 @@ ring_format() {
             return base
         }
         {
-            pid = $1; comm = $2; cpu = $3 + 0; rss = $4 + 0; st = $5
+            pid = $1; comm = $2; cpu = $3 + 0; rss = $4 + 0; st = $5; wch = $6
             if (pid == "" || comm == "") next
 
             key = comm
@@ -125,15 +135,36 @@ ring_format() {
             ecpu[key] += cpu
             erss[key] += rss
             eproc[key]++
-            if (st ~ /^D/) edstate[key]++
+
+            # Blocked task: record WHAT it is blocked on, not merely that it is.
+            # "-" and "0" are the kernel'\''s way of saying "not blocked / unknown",
+            # so they are counted as D-state but carry no channel.
+            if (st ~ /^D/) {
+                edstate[key]++
+                if (wch != "" && wch != "-" && wch != "0") {
+                    wchan_n[wch]++
+                    if (wchan_comm[wch] == "") wchan_comm[wch] = key
+                    ewchan[key "\t" wch]++
+                }
+            }
 
             # Attribute PHP workers to the endpoint they are serving, when args
-            # carries it. Everything from field 6 on is the command line.
-            if (NF >= 6) {
+            # carries it. Everything from field 7 on is the command line.
+            if (NF >= 7) {
                 args = ""
-                for (i = 6; i <= NF; i++) args = args (i > 6 ? " " : "") $i
+                for (i = 7; i <= NF; i++) args = args (i > 7 ? " " : "") $i
                 ep = php_endpoint(args)
-                if (ep != "") { phpcpu[ep] += cpu; phpproc[ep]++ }
+                if (ep != "") {
+                    phpcpu[ep] += cpu
+                    phpproc[ep]++
+                    # The endpoint-to-blocking join, captured live. This is what
+                    # turns "a filesystem stall occurred" into "this request was
+                    # the one waiting on it".
+                    if (st ~ /^D/) {
+                        phpdstate[ep]++
+                        if (wch != "" && wch != "-" && wch != "0") phpwchan[ep "\t" wch]++
+                    }
+                }
             }
 
             # Track the heaviest individual PIDs for the runaway case.
@@ -180,8 +211,28 @@ ring_format() {
             hlim = (m < nphp ? m : nphp)
             for (a = 1; a <= hlim; a++) {
                 k = hord[a]
-                printf "ts=%s iso=%s kind=php script=%s procs=%d cpu=%.2f\n", \
-                    now, iso, k, phpproc[k], phpcpu[k]
+                top = ""; topn = 0
+                for (kk in phpwchan) {
+                    split(kk, part, "\t")
+                    if (part[1] == k && phpwchan[kk] > topn) { topn = phpwchan[kk]; top = part[2] }
+                }
+                printf "ts=%s iso=%s kind=php script=%s procs=%d cpu=%.2f dstate=%d%s\n", \
+                    now, iso, k, phpproc[k], phpcpu[k], phpdstate[k] + 0, \
+                    (top != "" ? " wchan=" top : "")
+            }
+
+            # Wait-channel rows. Emitted only when something was actually blocked,
+            # so the ring stays quiet on a healthy box.
+            w = 0
+            for (k in wchan_n) { w++; word[w] = k }
+            for (a = 1; a <= w; a++)
+                for (b = a + 1; b <= w; b++)
+                    if (wchan_n[word[b]] > wchan_n[word[a]]) { t = word[a]; word[a] = word[b]; word[b] = t }
+            wlim = (w < nwchan ? w : nwchan)
+            for (a = 1; a <= wlim; a++) {
+                k = word[a]
+                printf "ts=%s iso=%s kind=wchan chan=%s procs=%d comm=%s\n", \
+                    now, iso, k, wchan_n[k], wchan_comm[k]
             }
         }
     '
@@ -306,6 +357,54 @@ ring_window_by_php() {
             n[script]++
         }
         END { for (s in n) printf "%s\t%d\t%.2f\t%d\n", s, maxp[s], maxc[s], n[s] }
+    ' | sort -t"$(printf '\t')" -k3,3 -rn
+}
+
+# Aggregates the window by kernel wait channel:
+#   chan <TAB> peak_procs <TAB> samples <TAB> comm
+#
+# The ring is the only place this data reliably exists. The panic-time sampler
+# starts after the trigger, by which point blocked tasks have typically cleared;
+# the ring is already sampling on the way up.
+ring_window_by_wchan() {
+    ring_window "$1" "${2:-}" | awk '
+        $0 ~ /kind=wchan/ {
+            chan = ""; procs = 0; comm = ""
+            for (i = 1; i <= NF; i++) {
+                if (index($i, "chan=") == 1)       { chan = substr($i, 6) }
+                else if (index($i, "procs=") == 1) { procs = substr($i, 7) + 0 }
+                else if (index($i, "comm=") == 1)  { comm = substr($i, 6) }
+            }
+            if (chan == "") next
+            if (procs > maxp[chan]) maxp[chan] = procs
+            if (comm != "") who[chan] = comm
+            n[chan]++
+        }
+        END { for (c in n) printf "%s\t%d\t%d\t%s\n", c, maxp[c], n[c], who[c] }
+    ' | sort -t"$(printf '\t')" -k2,2 -rn
+}
+
+# The join that answers "which request was waiting on which kernel subsystem":
+#   script <TAB> wchan <TAB> peak_dstate <TAB> samples
+#
+# Only PHP rows that were actually observed in D-state contribute, so a busy
+# endpoint that never blocked does not appear. This is co-occurrence within one
+# ring sample — the same instant, the same worker — not a causal proof.
+ring_window_php_wchan() {
+    ring_window "$1" "${2:-}" | awk '
+        $0 ~ /kind=php/ {
+            script = ""; ds = 0; wch = ""
+            for (i = 1; i <= NF; i++) {
+                if (index($i, "script=") == 1)      { script = substr($i, 8) }
+                else if (index($i, "dstate=") == 1) { ds = substr($i, 8) + 0 }
+                else if (index($i, "wchan=") == 1)  { wch = substr($i, 7) }
+            }
+            if (script == "" || wch == "" || ds <= 0) next
+            key = script "\t" wch
+            if (ds > maxd[key]) maxd[key] = ds
+            n[key]++
+        }
+        END { for (k in n) printf "%s\t%d\t%d\n", k, maxd[k], n[k] }
     ' | sort -t"$(printf '\t')" -k3,3 -rn
 }
 

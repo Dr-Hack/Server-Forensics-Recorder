@@ -9,6 +9,73 @@ Newest first.
 
 ---
 
+## Capturing D-state last in the panic snapshot — replaced in 0.6.0
+
+**What it did.** `capture_snapshot` ran its collectors in a readable order —
+general system state first (`vmstat`, `iostat`, `top`, `ps`, `ss`, `lsof`,
+`df`, `dmesg`, `journalctl`, `mysqladmin`), then the D-state/wchan forensics,
+then the I/O attribution.
+
+**Why it was wrong.** Blocked tasks are transient; general system state is not.
+The ordering spent the entire lifetime of the evidence collecting things that
+would still have been true a minute later. Section timestamps from
+`incident-20260728-143130` — an incident triggered *by* `dstate=8>5` — show the
+cost precisely: `vmstat 1 5` 4s, `iostat -xz 1 3` 2s, **`ss -antp` 17s**,
+`lsof -nP` 6s. The rapid sampler did not start until **29 seconds** after the
+trigger, and by then all 8 blocked tasks had cleared. Baseline lag on a healthy
+box was still 12-14s.
+
+This was silent in the worst way: 0.5.2 had just added rapid D-state sampling
+specifically to fix "Wait channels: unavailable", the sampler worked perfectly,
+and it honestly reported `no D-state processes caught across 6 samples` — 8
+times out of 8 across four incidents, and `Wait channel captured 0/34` across
+every incident on record. The report then called this "unavailable", which reads
+as a missing capability rather than an expired measurement, so the real cause
+went unexamined.
+
+**What replaced it.** Collectors are ordered by **perishability**, in three
+explicit tiers: sub-second `/proc` reads of volatile kernel state first
+(D-state, wchan, stacks, PSI); instantaneous single reads second; sampling
+windows and full-`/proc` walks last. `ss -antp` and `lsof -nP` run at the end.
+
+More importantly, the panic snapshot was accepted as the wrong *place* for this
+measurement at all. No trigger can outrun a sub-minute stall: load1 lags, the
+watcher runs every 60s, and panic mode starts after that. Wait channels are now
+captured continuously in the **ring buffer**, riding along on the `ps` it
+already runs — zero additional processes — so the evidence exists before the
+threshold is ever crossed. This is the same conclusion reached for per-process
+CPU in 0.4.0 and for PHP endpoints in 0.4.0; the panic snapshot is for context,
+the ring is for anything that expires.
+
+---
+
+## Attributing an incident to whatever the snapshot happened to catch — replaced in 0.6.0
+
+**What it did.** The analysis scored per-process evidence from the offender
+tables regardless of when in the incident window those tables were captured.
+
+**Why it was wrong.** It assumes the capture describes the incident. When
+`panic.sh` died mid-capture, nothing closed the incident — `incident_close` was
+reachable only from the panic loop — so it stayed open until the next unhealthy
+tick adopted it. `incident-20260728-183224` therefore spanned **3h27m**: its
+facts (13.3% CPU at load 21.79, 81.8% iowait, 6 D-state) described a storage
+stall at 18:32, while its only snapshot was taken at 21:59 during an unrelated
+nightly `dnf` transaction. The report confidently named **"Package manager
+(38%)"** as the cause, and cited "maintenance process 'dnf' is ALSO the measured
+top consumer — corroborated" as supporting evidence. Two unrelated events, one
+verdict, with the corroboration manufactured by the three-hour gap.
+`incident-20260728-143917` did the same for 3h13m.
+
+**What replaced it.** Three changes. The watcher closes an orphaned incident as
+soon as it sees a healthy sample, so the gap cannot open. The nearest capture's
+distance from the trigger is recorded (`capture_lag_min`), and beyond
+`STALE_CAPTURE_SECONDS` specific-cause confidence is held at the inconclusive
+floor with the reason stated in the ledger. Corroboration-by-measurement no
+longer lifts the cap on a presence hypothesis when the measurement is stale,
+because a stale capture corroborates only itself.
+
+---
+
 ## Ranking spikes by PID alone — replaced in 0.3.0
 
 **What it did.** `--offenders` and the analysis named the single highest-CPU and

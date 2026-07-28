@@ -32,6 +32,13 @@ main() {
 
     if ! reason="$(metrics_unhealthy_reason "$line")"; then
         log_debug "server healthy"
+        # An incident still marked active while the server is healthy means the
+        # panic process died without closing it. Nothing else can notice: the
+        # panic loop is gone, and the next unhealthy tick would adopt the stale
+        # incident and judge it on an unrelated event hours later. Sweep it.
+        if incident_active_dir >/dev/null; then
+            "${SCRIPT_DIR}/panic.sh" --finalize || log_warn "orphan sweep failed"
+        fi
         "${SCRIPT_DIR}/rotate.sh" >/dev/null 2>&1 || log_warn "rotation failed"
         # Spend the rest of the interval polling /proc/loadavg cheaply, taking a
         # full sample only while load is elevated, so a burst that starts and

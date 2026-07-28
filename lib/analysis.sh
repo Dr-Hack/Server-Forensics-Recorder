@@ -685,6 +685,23 @@ analysis_classify() {
         SF_CAP_SPECIFIC=65
     fi
 
+    # Stale-capture guard. Per-process evidence is only evidence OF the incident
+    # if it was measured near the incident. On production
+    # incident-20260728-183224 the sole snapshot landed 3h27m after the trigger,
+    # during an unrelated nightly dnf run, and the report named "Package manager"
+    # as the cause of a storage stall that had happened three hours earlier —
+    # while the incident's own facts (13.3% CPU at load 21.79, 81.8% iowait)
+    # described the original event. Two different events, one verdict.
+    SF_CAPTURE_STALE=0
+    SF_CAPTURE_LAG_MIN="$(incident_meta_get "$dir" capture_lag_min "")"
+    if [[ -n "$SF_CAPTURE_LAG_MIN" ]] && num_gt "$SF_CAPTURE_LAG_MIN" "${STALE_CAPTURE_SECONDS:-300}"; then
+        SF_CAPTURE_STALE=1
+        # The mechanism (blocked vs compute) still comes from the lightweight
+        # samples, which span the whole window, so it survives. Everything that
+        # depends on the offender tables does not.
+        SF_CAP_SPECIFIC="$SF_INCONCLUSIVE_FLOOR"
+    fi
+
     # CPU saturation is measured directly from cpu_busy_pct and the per-process
     # CPU ranking, so it does not depend on the kernel signals that gate the
     # storage-side hypotheses and is not capped by their absence.
@@ -695,8 +712,10 @@ analysis_classify() {
         elif sf_is_presence_hypothesis "$h"; then
             # Uncorroborated presence can never clear the floor, so it can never
             # be named as the cause. Corroboration by a measured offender table
-            # lifts the cap.
-            if [[ "${SF_MAINT_CORROBORATED:-0}" -eq 1 ]]; then
+            # lifts the cap — but only if that table was measured near the
+            # trigger. A stale capture corroborates itself: dnf was genuinely the
+            # top consumer at 21:59, which says nothing about the 18:32 stall.
+            if [[ "${SF_MAINT_CORROBORATED:-0}" -eq 1 && "${SF_CAPTURE_STALE:-0}" -eq 0 ]]; then
                 cap=60
             else
                 cap="$SF_INCONCLUSIVE_FLOOR"
@@ -837,12 +856,25 @@ analysis_ledger() {
 
     printf '  Missing evidence:\n'
     local missing=()
+    # Wording matters here: these lines are what a reader uses to decide whether
+    # to go fix a permissions problem. "No blocked tasks were present" is a
+    # measurement; "unavailable" is a false accusation against the recorder.
+    local sampler_pids
+    sampler_pids="$(analysis_sampler_stat "$dir" pids)"
     [[ "$SF_WCHAN_PRESENT" -eq 1 ]] || {
-        sf_cross "kernel wait channel unavailable"
+        if [[ -n "$sampler_pids" && "$sampler_pids" -eq 0 ]]; then
+            sf_cross "no D-state tasks observed during rapid sampling (transient stall)"
+        else
+            sf_cross "kernel wait channel unavailable"
+        fi
         missing+=("wait channel")
     }
     [[ "$SF_STACK_PRESENT" -eq 1 ]] || {
-        sf_cross "blocked kernel stack unavailable"
+        if [[ -n "$sampler_pids" && "$sampler_pids" -eq 0 ]]; then
+            sf_cross "no blocked task to read a kernel stack from during sampling"
+        else
+            sf_cross "blocked kernel stack unavailable"
+        fi
         missing+=("kernel stack")
     }
     [[ "$SF_PSI_PRESENT" -eq 1 ]] || {
@@ -850,6 +882,16 @@ analysis_ledger() {
         missing+=("PSI")
     }
     [[ "${#missing[@]}" -gt 0 ]] || printf '    (none — decisive evidence was captured)\n'
+
+    if [[ "${SF_CAPTURE_STALE:-0}" -eq 1 ]]; then
+        printf '  Capture staleness:\n'
+        printf '    [!] nearest per-process capture was %ss after the trigger (limit %ss).\n' \
+            "$SF_CAPTURE_LAG_MIN" "${STALE_CAPTURE_SECONDS:-300}"
+        printf '    The offender tables describe conditions at capture time, which may be a\n'
+        printf '    DIFFERENT event from the one that opened this incident. Specific-cause\n'
+        printf '    confidence is held at the inconclusive floor; trust the window facts\n'
+        printf '    (load/CPU/iowait/D-state) and the ring buffer over the offender tables.\n'
+    fi
 
     if [[ "${#missing[@]}" -gt 0 && "$SF_LEADER" != Inconclusive* ]]; then
         local IFS=', '
@@ -997,6 +1039,150 @@ analysis_aggregate_section() {
 # blocks). On a uniformly slow disk there is no single stuck file — the payoff is
 # the wait PATH, which points at the fix: jbd2_log_wait_commit -> journal/fsync
 # storm; wait_on_page_writeback -> dirty-page flushing; read/folio paths -> reads.
+# Blocked-task attribution: joins each captured wait channel to the endpoint or
+# process that was waiting in it.
+#
+# This is the step from "the system experienced a filesystem stall" to "this
+# request was the one blocked in the journal commit path". Two independent
+# sources are used, and the report says which is which:
+#
+#   dstate-*.log — the panic-time sampler, which now records the served script
+#                  alongside wchan for each blocked PID.
+#   ring buffer  — kind=php rows carrying dstate + wchan, sampled continuously
+#                  from before the trigger.
+#
+# Deliberately labelled co-occurrence, never causation. mod_lsapi does not
+# expose the request URI to the process layer, so this proves that a worker
+# serving endpoint X was blocked in channel Y at the same instant — not that
+# X's code caused Y. Overstating that would be exactly the kind of confident
+# prose this reporter exists to replace.
+analysis_blocked_attribution_section() {
+    local dir="$1"
+    local -a files=()
+    local pairs="" ring="" start end
+
+    mapfile -t files < <(analysis_dstate_logs "$dir")
+    if [[ "${#files[@]}" -gt 0 ]]; then
+        pairs="$(awk '
+            /^--- pid /       { ep = ""; wc = ""; next }
+            /^endpoint: /     { ep = substr($0, 11); next }
+            /^wchan:[[:space:]]/ {
+                wc = $2
+                if (ep != "" && wc != "" && wc != "-" && wc != "0") n[ep "\t" wc]++
+                next
+            }
+            END { for (k in n) printf "%s\t%d\n", k, n[k] }
+        ' "${files[@]}" 2>/dev/null | sort -t"$(printf '\t')" -k3,3 -rn | head -n 10)"
+    fi
+
+    if declare -F ring_window_php_wchan >/dev/null 2>&1; then
+        start="$(incident_meta_get "$dir" started_epoch 0)"
+        end="$(incident_meta_get "$dir" ended_epoch 0)"
+        ring="$(ring_window_php_wchan "$start" "$end" 2>/dev/null | head -n 10)"
+    fi
+
+    [[ -n "$pairs" || -n "$ring" ]] || return 0
+
+    printf 'Blocked-task attribution (which request was waiting on what):\n'
+    if [[ -n "$pairs" ]]; then
+        printf '  From kernel capture (panic-time sampler):\n'
+        printf '    %-42s %-28s %s\n' ENDPOINT WAIT_CHANNEL SAMPLES
+        printf '%s\n' "$pairs" | while IFS=$'\t' read -r ep wc cnt; do
+            [[ -n "$ep" ]] || continue
+            printf '    %-42s %-28s %s\n' "$ep" "$wc" "$cnt"
+        done
+    fi
+    if [[ -n "$ring" ]]; then
+        printf '  From ring buffer (continuous, includes pre-trigger):\n'
+        printf '    %-42s %-28s %s\n' ENDPOINT WAIT_CHANNEL PEAK_BLOCKED
+        printf '%s\n' "$ring" | while IFS=$'\t' read -r ep wc ds _; do
+            [[ -n "$ep" ]] || continue
+            printf '    %-42s %-28s %s\n' "$ep" "$wc" "$ds"
+        done
+    fi
+    printf '  Note: co-occurrence within a sample (same worker, same instant), not\n'
+    printf '  proof of causation — mod_lsapi does not expose the request URI to the\n'
+    printf '  process layer, so the endpoint is the served script, not the URL.\n'
+}
+
+# Reads the rapid sampler's own record of what it did. Returns "" when the
+# incident predates the sampler stats (older builds), so callers can tell
+# "never recorded" apart from "recorded a zero".
+analysis_sampler_stat() {
+    local dir="$1" key="$2"
+    incident_meta_get "$dir" "dstate_sampler_${key}" ""
+}
+
+# The distinction the previous wording erased. "unavailable" reads as a missing
+# capability or a permissions problem; in every incident so far the truth was
+# that the sampler ran correctly and the blocked tasks had already cleared. An
+# absence of evidence is only informative if it is reported as a RESULT.
+analysis_evidence_state() {
+    local dir="$1" present="$2" pids
+
+    if [[ "$present" -eq 1 ]]; then
+        printf 'captured\n'
+        return 0
+    fi
+
+    pids="$(analysis_sampler_stat "$dir" pids)"
+    if [[ -z "$pids" ]]; then
+        printf 'not captured (sampler did not record its result)\n'
+    elif [[ "$pids" -eq 0 ]]; then
+        printf 'none observed — sampler ran, no tasks were blocked during its window\n'
+    else
+        printf 'not readable (kernel or permissions withheld it)\n'
+    fi
+}
+
+# Capture provenance: what the sampler did, when it started relative to the
+# trigger, and — when the periodic samples saw blocking that the rapid sampler
+# missed — why. This is what makes an empty capture actionable instead of
+# mysterious, and it is the measurement that says whether the sampling window
+# needs to move earlier or grow.
+analysis_capture_section() {
+    local dir="$1"
+    local samples pids stacks syscalls lag peak_dstate
+
+    samples="$(analysis_sampler_stat "$dir" samples)"
+    [[ -n "$samples" ]] || return 0
+
+    pids="$(analysis_sampler_stat "$dir" pids)"
+    stacks="$(analysis_sampler_stat "$dir" stacks)"
+    syscalls="$(analysis_sampler_stat "$dir" syscalls)"
+    lag="$(analysis_sampler_stat "$dir" lag)"
+    peak_dstate="$(incident_meta_get "$dir" peak_dstate 0)"
+
+    printf '%s\n' '-- Capture (what the recorder actually measured) --'
+    printf '  - Rapid D-state sampling: completed, %s samples\n' "$samples"
+    printf '  - Unique D-state processes observed: %s\n' "${pids:-0}"
+    printf '  - Kernel stacks captured: %s\n' "${stacks:-0}"
+    printf '  - Syscalls captured: %s\n' "${syscalls:-0}"
+    if [[ -n "$lag" && "$lag" -ge 0 ]]; then
+        printf '  - Capture began %ss after the incident trigger\n' "$lag"
+    else
+        printf '  - Capture lag: not recorded\n'
+    fi
+
+    # The reconciliation. Periodic sampling counts D-state every 60s; the rapid
+    # sampler reads kernel state during a ~3s window. Peak > 0 with observed = 0
+    # is not a contradiction and not a fault — it dates the stall.
+    if [[ "${pids:-0}" -eq 0 ]] && num_gt "${peak_dstate:-0}" 0; then
+        printf '  - Reconciliation: periodic sampling recorded up to %s blocked task(s),\n' "$peak_dstate"
+        printf '    but none were still blocked when the rapid sampler ran%s.\n' \
+            "$([[ -n "$lag" && "$lag" -ge 0 ]] && printf ' %ss later' "$lag" || printf '')"
+        printf '    The stall was TRANSIENT and had already recovered before kernel-level\n'
+        printf '    evidence could be collected. This bounds its duration rather than\n'
+        printf '    leaving it unknown.\n'
+        if [[ -n "$lag" && "$lag" -gt 5 ]]; then
+            printf '    Tuning: a %ss lag is long for a sub-minute stall — consider raising\n' "$lag"
+            printf '    PANIC_DSTATE_SAMPLES / PANIC_DSTATE_INTERVAL, and read the ring\n'
+            printf '    buffer (kind=wchan rows), which samples before the trigger fires.\n'
+        fi
+    fi
+    printf '\n'
+}
+
 analysis_wchan_section() {
     local dir="$1"
     local hist
@@ -1362,9 +1548,11 @@ analysis_generate() {
         else
             printf '  - PSI: not captured\n'
         fi
-        printf '  - Wait channels: %s\n' "$([[ "$SF_WCHAN_PRESENT" -eq 1 ]] && echo captured || echo unavailable)"
-        printf '  - Kernel stacks: %s\n' "$([[ "$SF_STACK_PRESENT" -eq 1 ]] && echo captured || echo unavailable)"
+        printf '  - Wait channels: %s\n' "$(analysis_evidence_state "$dir" "$SF_WCHAN_PRESENT")"
+        printf '  - Kernel stacks: %s\n' "$(analysis_evidence_state "$dir" "$SF_STACK_PRESENT")"
         printf '\n'
+
+        analysis_capture_section "$dir"
 
         printf '%s\n' '-- Inference (reasoning from the facts) --'
         if [[ "${#SF_EVIDENCE[@]}" -gt 0 ]]; then
@@ -1385,6 +1573,12 @@ analysis_generate() {
         wchan_out="$(analysis_wchan_section "$dir")"
         if [[ -n "$wchan_out" ]]; then
             printf '%s\n\n' "$wchan_out"
+        fi
+
+        local blocked_out
+        blocked_out="$(analysis_blocked_attribution_section "$dir")"
+        if [[ -n "$blocked_out" ]]; then
+            printf '%s\n\n' "$blocked_out"
         fi
 
         analysis_ledger "$dir"
