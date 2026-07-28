@@ -124,15 +124,24 @@ Namecheap directly. Root cause was already proven on 2026-07-27 (incident
 183639: `vda` 97% util at 56-125ms `w_await` while doing **under 1 MB/s**, dmesg
 clean). What is missing is not the finding but the **time series** to argue with.
 
-Three gaps, in order:
+Three gaps. The first is now closed; two remain.
 
-1. **`steal_pct` is not captured.** This is the single strongest metric in a
-   provider dispute: steal time is the vCPU being ready to run while the
-   hypervisor gave the physical core to someone else. **It cannot be caused by
-   our own workload**, so it is not arguable. `/proc/stat` field 9 already sits
-   in the line `read_cpu_fields` parses for user/nice/system/idle/iowait — this
-   is one extra awk field and **zero additional cost**. Without it, a noisy
-   neighbour is invisible to every report we produce.
+1. ~~**`steal_pct` is not captured.**~~ **DONE in 0.6.1.** Steal time is the vCPU
+   being ready to run while the hypervisor gave the physical core to someone
+   else — it cannot be caused by our own workload, so it is not arguable, which
+   makes it the strongest single metric in a provider dispute. `/proc/stat`
+   field 9 was already inside the line `read_cpu_fields` sums for `total`, so it
+   costs nothing. Now reported as `Peak CPU Steal` in `summary.txt`, an observed
+   fact, **per-row timeline annotations** (`<- CPU steal 44.7% (host)` — these
+   are the timestamps to quote), a `CPU steal (host contention) n/N`
+   recurring-patterns line, and a provider action item. Gated by
+   `STEAL_NOTABLE_PCT` (default 5).
+   - Carried forward as a caveat: `cpu_busy_pct` counts stolen time as busy
+     (`total - idle - iowait`, and `total` includes steal). The definition was
+     left unchanged for comparability with previously recorded incidents; the
+     analysis discloses the overlap, and when the verdict is *CPU saturation* the
+     ledger raises stolen time as a competing explanation — otherwise host
+     contention gets scored as local load.
 2. **Disk latency is not in the per-minute timeline.** `r_await` / `w_await` /
    `%util` exist only inside panic `iostat` output, so we can show a stall but
    cannot plot latency across an evening. Deriving await from a
@@ -190,10 +199,13 @@ The project is already useful in production. With the evidence-based reporter,
 PSI capture, timeline, correlation engine and perishability-ordered capture in
 place, the highest-value remaining work is, in order:
 
-1. **Provider accountability evidence** — `steal_pct` first (one awk field, no
-   added cost, and the only metric a provider cannot attribute back to us), then
-   per-minute disk latency, then `--provider-evidence`. This is what converts a
-   proven diagnosis into a case Namecheap has to answer.
+1. **Provider accountability evidence** — `steal_pct` shipped in 0.6.1; what
+   remains is **per-minute disk latency** from a `/proc/diskstats` delta, then
+   the `--provider-evidence` report. This is what converts a proven diagnosis
+   into a case Namecheap has to answer. Storage is the harder half: steal is
+   already unarguable, whereas latency-at-low-throughput is an inference, so the
+   value of a per-minute series is that it shows the pattern holding across
+   hours rather than in a single captured moment.
 2. **Tune the wchan/comm maps against real captures.** The maps in
    `lib/analysis.sh` are still seeded from general Linux knowledge, and until
    0.6.0 no incident had ever captured a wait channel to check them against. The
