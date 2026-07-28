@@ -88,7 +88,67 @@ them for this server's actual wait channels.
 
 ---
 
+## Capture timing (0.6.0, shipped 2026-07-29)
+
+The 0.5.2 rapid D-state sampler worked and still reported
+`no D-state processes caught across 6 samples` **8 times out of 8** across four
+consecutive incidents (`Wait channel captured 0/34` all-time). It was arriving
+too late, not failing. On `incident-20260728-143130` — triggered *by*
+`dstate=8>5` — the collectors ahead of it cost 29s (`vmstat` 4s, `iostat` 2s,
+`ss -antp` **17s**, `lsof -nP` 6s) and every blocked task had cleared.
+
+- **Capture ordered by perishability** — D-state/wchan/stacks/PSI first,
+  `ss`/`lsof` last. Lag 13-29s → <1s.
+- **Wait channels in the ring buffer** — `wchan` rides on the `ps` the ring
+  already runs (no extra process). The structural fix: no trigger can outrun a
+  sub-minute stall, so the ring, which samples before the threshold trips, is now
+  the primary source and the panic snapshot is context.
+- **Blocked-task attribution** — `kind=php` rows carry `dstate` + `wchan`, so a
+  report can say *which request* was waiting in which kernel subsystem.
+- **Orphan sweep** — the watcher closes an incident left open by a dead
+  `panic.sh`. Two 3h+ orphans on 2026-07-28 were each closed against an
+  unrelated later event; 183224 was scored "Package manager 38%" on a `dnf` run
+  three hours after its trigger.
+- **Stale-capture guard**, **ERR trap**, **snapshot index reservation**,
+  **capture provenance reporting**.
+
+---
+
 ## Remaining ideas (not yet implemented)
+
+### Provider accountability evidence (HIGHEST PRIORITY)
+
+**Goal:** produce a timestamped, defensible record that the stalls originate
+**below** the OS — the hypervisor and the storage backend — so it can be put to
+Namecheap directly. Root cause was already proven on 2026-07-27 (incident
+183639: `vda` 97% util at 56-125ms `w_await` while doing **under 1 MB/s**, dmesg
+clean). What is missing is not the finding but the **time series** to argue with.
+
+Three gaps, in order:
+
+1. **`steal_pct` is not captured.** This is the single strongest metric in a
+   provider dispute: steal time is the vCPU being ready to run while the
+   hypervisor gave the physical core to someone else. **It cannot be caused by
+   our own workload**, so it is not arguable. `/proc/stat` field 9 already sits
+   in the line `read_cpu_fields` parses for user/nice/system/idle/iowait — this
+   is one extra awk field and **zero additional cost**. Without it, a noisy
+   neighbour is invisible to every report we produce.
+2. **Disk latency is not in the per-minute timeline.** `r_await` / `w_await` /
+   `%util` exist only inside panic `iostat` output, so we can show a stall but
+   cannot plot latency across an evening. Deriving await from a
+   `/proc/diskstats` delta uses the same persisted-previous-sample technique as
+   the CPU delta — cheap, no `iostat` spawn, and it makes latency a first-class
+   time series.
+3. **No report aimed at the dispute.** A `--provider-evidence [since]` command
+   emitting a timestamped table — time, load, cpu, **steal**, iowait, `w_await`,
+   `%util`, throughput, PSI io — with the argument stated explicitly: *high
+   latency and high steal at low throughput is backend contention, not our
+   load.* Correlating against `%steal` distinguishes a noisy CPU neighbour from
+   a noisy storage neighbour.
+
+The honest limit to state in that report: `%steal` proves CPU contention
+directly, whereas storage contention is inferred from latency-at-low-throughput.
+Both are strong; only the first is unarguable.
 
 ### Trend detection
 Flag rapid changes rather than only absolute values, e.g. "load +450% in 4 min"
@@ -127,7 +187,16 @@ digest and the ability to target an arbitrary past incident by id.
 | Root-cause reasoning | Strong — observed/inferred/proven with evidence-gated confidence |
 
 The project is already useful in production. With the evidence-based reporter,
-PSI capture, timeline, and correlation engine in place, the highest-value
-remaining work is **feeding real production `dstate-*.log` + PSI peaks back into
-the wchan/comm maps and scoring weights**, then **trend detection** to turn raw
-samples in `summary.txt` into a plain-language explanation.
+PSI capture, timeline, correlation engine and perishability-ordered capture in
+place, the highest-value remaining work is, in order:
+
+1. **Provider accountability evidence** — `steal_pct` first (one awk field, no
+   added cost, and the only metric a provider cannot attribute back to us), then
+   per-minute disk latency, then `--provider-evidence`. This is what converts a
+   proven diagnosis into a case Namecheap has to answer.
+2. **Tune the wchan/comm maps against real captures.** The maps in
+   `lib/analysis.sh` are still seeded from general Linux knowledge, and until
+   0.6.0 no incident had ever captured a wait channel to check them against. The
+   ring should start producing `kind=wchan` rows now, so this is finally
+   testable.
+3. **Trend detection** — turn raw samples in `summary.txt` into plain language.

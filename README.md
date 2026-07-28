@@ -123,6 +123,17 @@ snapshots are tuned for cPanel-style hosting stacks.
 - **D-state / blocking forensics** — records which processes blocked, on which
   kernel wait channel, and the **PSI** pressure behind it, the answer to
   "high load, low CPU"
+- **Continuous wait-channel capture** — `wchan` is sampled by the ring buffer on
+  the `ps` it already runs, so it costs no extra process and, unlike any
+  panic-time capture, it is already sampling *before* the threshold trips.
+  Blocked tasks clear in seconds; a trigger-driven snapshot structurally cannot
+  win that race
+- **Blocked-task attribution** — ties a blocked worker to the endpoint it was
+  serving: "the worker serving `wp-admin/admin-ajax.php` was blocked in
+  `jbd2_log_wait_commit`", not merely "a filesystem stall occurred"
+- **Capture provenance** — every report states what the sampler did, what it
+  observed, and **how many seconds after the trigger it started**, so an empty
+  capture reads as a measured transient rather than a broken recorder
 - **Request-level attribution** — names the PHP endpoint (from the `mod_lsapi`
   worker argv), the URL, and the client IP behind a spike; Cloudflare-aware,
   self-request aware, and broken out per vhost. See `--requests` and `--runup`
@@ -336,6 +347,18 @@ snapshot also writes a `dstate-N.log` capturing:
 - `pstree -ap` to show which service spawned the blocked process
 - scheduled jobs (`systemctl list-timers`, `crontab -l`, `/etc/cron.*`)
 - maintenance / package / backup processes **detected** from the process table
+
+These captures run **first** in a panic snapshot, ahead of every collector with a
+sampling window or a full-`/proc` walk. That ordering is not cosmetic: it was
+previously last, and across four consecutive production incidents the sampler
+caught **zero** blocked tasks in eight attempts, because `vmstat`, `iostat`,
+`ss -antp` (17s) and `lsof -nP` ran first and the tasks had cleared by the time
+it started 29 seconds later. Collectors are now ordered by how fast the evidence
+expires. See [docs/decisions.md](docs/decisions.md).
+
+Even so, no trigger can outrun a sub-minute stall — `load1` lags and the watcher
+runs every 60s — which is why the **ring buffer** is the primary wait-channel
+source and the panic snapshot is for context.
 
 > Package managers (`dnf`, `yum`, `rpm`) are **detected, never invoked**. Running
 > them during a stall could block on locks or the network and make the recorder
