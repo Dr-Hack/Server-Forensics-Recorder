@@ -69,6 +69,11 @@ captures deeper diagnostics only when the server crosses a configured threshold.
 It is intentionally not a monitoring dashboard. Netdata, Prometheus, Grafana,
 and similar tools are still the right place for live monitoring.
 
+> **The story behind it:**
+> [High Server Load, Low CPU: I Built a Black Box for My Linux Server](https://blog.drhack.net/high-server-load-low-cpu-server-forensics-recorder/)
+> — the outages that started it, the five wrong answers this tool confidently
+> gave along the way, and the kernel evidence that finally named the real cause.
+
 ## Example Output
 
 Every report is plain text you can read over SSH or pipe anywhere — no daemon, no
@@ -571,6 +576,7 @@ GitHub Actions runs:
 
 ## Documentation
 
+- [Why this exists — the full story (blog)](https://blog.drhack.net/high-server-load-low-cpu-server-forensics-recorder/)
 - [Design background](DESIGN.md)
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md)
