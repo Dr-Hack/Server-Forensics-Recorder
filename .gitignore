@@ -3,6 +3,15 @@ logs/
 *.log
 *.tar.gz
 
+# Incident exports pulled off production — these carry real client IPs,
+# account paths and domain names. Never commit them.
+*.zip
+
+# Blog drafts and their images; published on the blog, not shipped with the tool
+blog-post-*.md
+blog-post-*.html
+blog-images/
+
 # Local editor and OS files
 .DS_Store
 Thumbs.db
